@@ -1,0 +1,43 @@
+# Every pull request: the catalog must build, each archive it points to must
+# download, match its pinned SHA-256 and pass the installer's own checks, and
+# CODEOWNERS must match the publishers.
+name: Validate
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dart-lang/setup-dart@v1
+
+      - name: Install the store tool
+        run: |
+          dart pub global activate just_core_cli
+          dart pub global activate --source git https://github.com/just-unknown-dev/just-asset-store
+
+      - name: The catalog builds
+        run: just store index check .
+
+      - name: Changed items download and install cleanly
+        run: |
+          changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- items \
+            | cut -d/ -f2 | sort -u)
+          for id in $changed; do
+            if [ -d "items/$id" ]; then
+              just store index check . --download --only "$id"
+            fi
+          done
+
+      - name: CODEOWNERS is up to date
+        run: |
+          just store index codeowners . > /tmp/CODEOWNERS
+          diff -u .github/CODEOWNERS /tmp/CODEOWNERS

@@ -1,0 +1,23 @@
+{
+  "categories": [
+    {"id": "characters", "label": "Characters", "order": 10},
+    {"id": "tilesets", "label": "Tilesets & maps", "order": 20},
+    {"id": "props", "label": "Props & items", "order": 30},
+    {"id": "backgrounds", "label": "Backgrounds", "order": 40},
+    {"id": "vfx", "label": "Effects", "order": 50},
+    {"id": "ui", "label": "Interface", "order": 60},
+    {"id": "audio", "label": "Sound & music", "order": 70},
+    {"id": "fonts", "label": "Fonts", "order": 80},
+    {"id": "templates", "label": "Level templates", "order": 90},
+    {"id": "editors", "label": "Editor tools", "order": 100},
+    {"id": "kits", "label": "Genre kits", "order": 110},
+    {"id": "libraries", "label": "Libraries", "order": 120},
+    {"id": "core", "label": "Editor core", "order": 130}
+  ],
+  "maintainers": ["ju-skb"],
+  "source": {
+    "homepage": "https://github.com/just-unknown-dev/just-asset-store-catalog",
+    "id": "just-official",
+    "name": "Just Asset Store"
+  }
+}

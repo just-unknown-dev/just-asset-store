@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "commands": [
+    {
+      "name": "store",
+      "summary": "Install, update and remove Asset Store items, and pack your own."
+    }
+  ],
+  "shortcuts": {
+    "add": "store install",
+    "remove": "store uninstall"
+  },
+  "hooks": {
+    "check": "store generate --check",
+    "doctor": "store generate --check"
+  }
+}

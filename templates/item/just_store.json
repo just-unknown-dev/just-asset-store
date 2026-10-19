@@ -1,0 +1,13 @@
+{
+  "category": "characters",
+  "content": {
+    "assetFolders": ["sprites/"],
+    "entryPoints": [{"kind": "sprite", "path": "sprites/knight.json"}]
+  },
+  "id": "your_item_name",
+  "kind": "content",
+  "license": {"attribution": "Knight by Your Name (CC BY 4.0)", "spdx": "CC-BY-4.0"},
+  "name": "Your item",
+  "schema": 1,
+  "version": "1.0.0"
+}

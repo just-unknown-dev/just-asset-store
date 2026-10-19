@@ -1,0 +1,14 @@
+{
+  "category": "core",
+  "editor": {
+    "editorOnlyLibraries": [
+      "*"
+    ]
+  },
+  "id": "just_asset_store",
+  "kind": "editor-extension",
+  "name": "Asset Store core",
+  "schema": 1,
+  "system": true,
+  "version": "0.1.0"
+}
