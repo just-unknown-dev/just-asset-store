@@ -84,7 +84,10 @@ abstract final class Packer {
   ///
   /// Throws [PackageCheckException] or [StoreFormatException] when it
   /// would be refused.
-  static PackResult pack(Directory folder) {
+  ///
+  /// [excluding] is a folder inside [folder] (relative to it, with `/`)
+  /// to leave out: where the archive is written, when that is inside.
+  static PackResult pack(Directory folder, {String? excluding}) {
     final project = StoreProject(folder.path);
     final manifestFile = project.file(ItemManifest.fileName);
     if (!manifestFile.existsSync()) {
@@ -107,6 +110,11 @@ abstract final class Packer {
       if (entity is! File) continue;
       final rel = project.relativeOf(entity.path);
       if (rel == null || FileHashes.isToolPath(rel)) continue;
+      if (excluding != null &&
+          excluding.isNotEmpty &&
+          (rel == excluding || rel.startsWith('$excluding/'))) {
+        continue;
+      }
       final parts = rel.split('/');
       if (parts.any((p) => p.startsWith('.'))) continue;
       if (parts.length > 1 && skippedFolders.contains(parts.first)) continue;
@@ -131,7 +139,12 @@ abstract final class Packer {
       name: manifest.name,
       kind: manifest.kind,
       category: manifest.category,
-      versions: [StoreItemVersion(version: manifest.version)],
+      versions: [
+        StoreItemVersion(
+          version: manifest.version,
+          dependencies: manifest.dependencies,
+        ),
+      ],
     );
     PackageCheck.check(ZipArchive.read(bytes), item, item.versions.single);
 

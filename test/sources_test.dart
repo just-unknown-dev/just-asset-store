@@ -1,5 +1,8 @@
 // Catalog sources (a folder, and a real HTTP server on this machine) and
 // the downloader's checks and cache.
+@TestOn('vm')
+library;
+
 import 'dart:convert';
 import 'dart:io';
 
@@ -351,4 +354,107 @@ void main() {
       );
     });
   });
+
+  group('catalogs in pages', () {
+    Map<String, Object?> page(List<String> ids, {String? next}) => {
+      'schema': 1,
+      'source': {'id': 'paged', 'name': 'Paged'},
+      'categories': [
+        {'id': 'characters', 'label': 'Characters'},
+      ],
+      'items': [
+        for (final id in ids)
+          {
+            'id': id,
+            'name': id,
+            'kind': 'content',
+            'category': 'characters',
+            'versions': [
+              {
+                'version': '1.0.0',
+                'archive': {'url': '$id.zip', 'sha256': 'a' * 64, 'size': 1},
+              },
+            ],
+          },
+      ],
+      'next': ?next,
+    };
+
+    MemoryStoreSource source(
+      Map<String, Map<String, Object?>> pages,
+    ) => MemoryStoreSource(
+      StoreIndex.fromJson(JsonFields(pages['index.json']!)),
+      {for (final e in pages.entries) e.key: utf8.encode(jsonEncode(e.value))},
+      base: 'https://catalog.example.com/',
+    );
+
+    test('every page is read: one catalog', () async {
+      final s = source({
+        'index.json': page(['a'], next: 'page2.json'),
+        'page2.json': page(['b'], next: 'page3.json'),
+        'page3.json': page(['c']),
+      });
+      final index = await s.withPages(s.index);
+      expect(index.items.map((i) => i.id), ['a', 'b', 'c']);
+      expect(index.next, isNull);
+    });
+
+    test('pages that go round, or list an item twice, are refused', () async {
+      final circle = source({
+        'index.json': page(['a'], next: 'page2.json'),
+        'page2.json': page(['b'], next: 'index.json'),
+      });
+      await expectLater(
+        circle.withPages(circle.index),
+        throwsA(isA<SourceException>()),
+      );
+      final twice = source({
+        'index.json': page(['a'], next: 'page2.json'),
+        'page2.json': page(['a']),
+      });
+      await expectLater(
+        twice.withPages(twice.index),
+        throwsA(isA<StoreFormatException>()),
+      );
+    });
+  });
+
+  test(
+    "a web catalog's archives are never on this machine's own address",
+    () async {
+      final index = StoreIndex.fromJson(
+        JsonFields({
+          'schema': 1,
+          'source': {'id': 'x', 'name': 'X'},
+          'categories': [
+            {'id': 'characters', 'label': 'Characters'},
+          ],
+          'items': [
+            {
+              'id': 'k',
+              'name': 'K',
+              'kind': 'content',
+              'category': 'characters',
+              'versions': [
+                {
+                  'version': '1.0.0',
+                  'archive': {
+                    'url': 'http://127.0.0.1:8080/admin?x',
+                    'sha256': 'a' * 64,
+                    'size': 1,
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      );
+      final web = MemoryStoreSource(index, const {}, base: 'https://e.com/');
+      final item = index.items.single;
+      await expectLater(
+        web.resolveDownload(item, item.versions.single),
+        throwsA(isA<SourceException>()),
+      );
+    },
+  );
 }

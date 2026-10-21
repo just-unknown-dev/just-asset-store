@@ -1,8 +1,6 @@
-/// Moved to `package:just_core_cli`, which the store now builds on. Re-exported
-/// here so the store's own imports, and the editor's, stay as they were.
+/// Versions and version constraints, from just_core_cli, which the store
+/// builds on.
 library;
 
-export 'package:just_core_cli/project.dart'
-    show
-        Version,
-        VersionConstraint;
+export 'package:just_core_cli/just_core_cli.dart'
+    show Version, VersionConstraint;

@@ -1,19 +1,25 @@
 name: just_asset_store
-description: "The core of the Just Asset Store. Reads store catalogs, downloads and verifies items, and installs them into a project as packages. Pure Dart, built on just_core_cli; its commands are `just store ...` and the editor's store window is just_asset_store_editor."
+description: "The core of the Just Asset Store: reads catalogs, checks item archives and installs items into Flutter projects as packages, with the `just store` commands."
 version: 0.1.0
-publish_to: none
 homepage: https://github.com/just-unknown-dev/just-asset-store
 repository: https://github.com/just-unknown-dev/just-asset-store
 issue_tracker: https://github.com/just-unknown-dev/just-asset-store/issues
+
+topics:
+  - gamedev
+  - game-engine
+  - assets
+  - package-manager
+  - cli
 
 environment:
   sdk: ^3.11.0
 
 dependencies:
-  just_core_cli: ^0.1.0
-  just_deflate: ^0.1.0
+  just_core_cli: ^0.1.1
+  meta: ^1.15.0
 
 dev_dependencies:
+  just_deflate: ^0.1.0
   lints: ^6.0.0
   test: ^1.25.6
-

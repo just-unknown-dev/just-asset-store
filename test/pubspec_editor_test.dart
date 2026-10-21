@@ -1,5 +1,8 @@
 // The pubspec editor: the store's blocks change, every other byte stays,
 // and anything it can't edit safely is refused.
+@TestOn('vm')
+library;
+
 import 'dart:io';
 
 import 'package:just_asset_store/just_asset_store.dart';

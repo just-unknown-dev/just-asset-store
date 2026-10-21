@@ -1,5 +1,8 @@
 // The ZIP reader against archives from real tools, the writer's
 // reproducibility, and every kind of archive the store must refuse.
+@TestOn('vm')
+library;
+
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';

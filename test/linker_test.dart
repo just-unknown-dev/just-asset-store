@@ -1,5 +1,8 @@
 // Linking a developer's checkout, and vendoring it into the project as an
 // ordinary installed item.
+@TestOn('vm')
+library;
+
 import 'dart:convert';
 import 'dart:io';
 
@@ -14,7 +17,9 @@ Directory project({String extra = ''}) {
   writeFiles(dir, {
     'pubspec.yaml': pubspecOf(
       'app',
-      extra: 'dependencies:\n  just_tool: ^1.0.0\n$extra',
+      extra:
+          'dependencies:\n  just_tool: ^1.0.0\n  just_game_engine: ^1.0.0\n'
+          'dev_dependencies:\n  just_game_engine_editor: ^0.1.0\n$extra',
     ),
     // A developer's checkout of a store item, with what a checkout has.
     'dev/just_tool/pubspec.yaml': pubspecOf('just_tool', version: '1.2.0'),

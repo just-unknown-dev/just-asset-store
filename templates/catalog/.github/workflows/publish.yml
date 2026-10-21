@@ -1,5 +1,5 @@
 # Every merge to main: build index.json and the pictures beside it, and
-# publish them on GitHub Pages — the address the editor's store reads.
+# publish them on GitHub Pages, at https://<owner>.github.io/<repo>/index.json.
 name: Publish
 
 on:
@@ -12,9 +12,14 @@ permissions:
   pages: write
   id-token: write
 
+# One deploy at a time, and never one cut off half way.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
+
+env:
+  # The store tool, at a version that never moves under this workflow.
+  STORE_VERSION: 0.1.0
 
 jobs:
   publish:
@@ -23,21 +28,19 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dart-lang/setup-dart@v1
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
 
       - name: Install the store tool
-        run: |
-          dart pub global activate just_core_cli
-          dart pub global activate --source git https://github.com/just-unknown-dev/just-asset-store
+        run: dart pub global activate just_asset_store "$STORE_VERSION"
 
       - name: Build the catalog
-        run: just store index build . -o site
+        run: dart pub global run just_asset_store:just_plugin store index build . -o site
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site
 
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

@@ -1,6 +1,9 @@
 // Installing, updating and removing items in a real project folder — and
 // proving that a failure at any step, or a crash, leaves it exactly as it
 // was.
+@TestOn('vm')
+library;
+
 import 'dart:convert';
 import 'dart:io';
 
@@ -19,7 +22,10 @@ const String pubspecText =
     '# The game\'s own dependencies. Keep this comment.\r\n'
     'dependencies:\r\n'
     '  flutter:\r\n'
-    '    sdk: flutter\r\n';
+    '    sdk: flutter\r\n'
+    '  just_game_engine: ^1.0.0\r\n'
+    'dev_dependencies:\r\n'
+    '  just_game_engine_editor: ^0.1.0\r\n';
 
 final List<TestItem> items = [
   TestItem(
@@ -131,7 +137,15 @@ void main() {
       isTrue,
     );
     final pubspec = f.read('pubspec.yaml');
-    expect(pubspec, startsWith(pubspecText.replaceFirst(RegExp(r'\r\n$'), '')));
+    // Every line the project had is still there, in order: the store only
+    // adds its block.
+    final lines = pubspec.split('\r\n');
+    var at = 0;
+    for (final line in pubspecText.split('\r\n').where((l) => l.isNotEmpty)) {
+      at = lines.indexOf(line, at);
+      expect(at, isNot(-1), reason: line);
+      at++;
+    }
     expect(
       pubspec,
       contains("# The game's own dependencies. Keep this comment.\r\n"),
@@ -459,6 +473,131 @@ void main() {
       );
     });
   });
+
+  test('a dependency installed on purpose joins the pubspec', () async {
+    final f = await Fixture.create();
+    await f.install('just_kit');
+    expect(f.project.readLock().items['just_art_knight']!.direct, isFalse);
+    final before = Map.of(f.project.readLock().items['just_art_knight']!.files);
+    final result = await f.install('just_art_knight');
+    expect(result.changes.single.kind, ChangeKind.adopt);
+    expect(result.needsRestart, isFalse);
+    final knight = f.project.readLock().items['just_art_knight']!;
+    expect(knight.direct, isTrue);
+    expect(knight.files, before, reason: 'nothing replaced');
+    expect(
+      PubspecEditor.parse(
+        f.read('pubspec.yaml'),
+        marker: storeBlock,
+      ).managed('dependencies').keys,
+      containsAll(['just_art_knight', 'just_kit']),
+    );
+    // Now the kit can go, and the knight stays.
+    final plan = (await f.planner()).uninstall('just_kit');
+    expect(plan.changes.map((c) => c.id), ['just_kit']);
+  });
+
+  test("a package may not depend on a store item it doesn't declare", () async {
+    final dir = tempDir('install');
+    writeFiles(dir, {'pubspec.yaml': pubspecText});
+    final source = buildCatalog(tempDir('catalog'), [
+      TestItem('just_art_knight'),
+      TestItem(
+        'sneaky_kit',
+        kind: ItemKind.kit,
+        category: 'kits',
+        files: {'lib/sneaky_kit.dart': ''},
+        // Its pubspec needs the knight; neither its manifest nor the
+        // catalog says so, so the store would not install it.
+        mutate: (v, files) => files['pubspec.yaml'] = utf8.encode(
+          'name: sneaky_kit\nversion: $v\nenvironment:\n  sdk: ^3.0.0\n'
+          "dependencies:\n  just_art_knight: '^1.0.0'\n",
+        ),
+      ),
+    ]);
+    final catalog = StoreCatalog([
+      ('test', source, (await source.fetchIndex()).index),
+    ]);
+    final project = StoreProject(dir.path);
+    final plan = Planner(
+      catalog,
+      ProjectState.read(project, await OverridesTarget.detect(project)),
+    ).install('sneaky_kit');
+    final before = snapshot(dir);
+    await expectLater(
+      StoreInstaller(project: project, pub: FakePub()).apply(plan),
+      throwsA(
+        isA<InstallFailure>().having(
+          (e) => e.message,
+          'message',
+          contains('pub would look for another package named just_art_knight'),
+        ),
+      ),
+    );
+    expect(snapshot(dir), before);
+  });
+
+  test("the manifest and the catalog agree on what it needs", () async {
+    final dir = tempDir('install');
+    writeFiles(dir, {'pubspec.yaml': pubspecText});
+    final catalogDir = tempDir('catalog');
+    final source = buildCatalog(catalogDir, [
+      TestItem('just_art_knight'),
+      TestItem(
+        'just_kit',
+        kind: ItemKind.kit,
+        category: 'kits',
+        dependencies: {'just_art_knight': '^1.0.0'},
+        files: {'lib/just_kit.dart': ''},
+      ),
+    ]);
+    // The catalog forgets the kit's dependency.
+    final file = File('${catalogDir.path}/index.json');
+    final json = jsonDecode(file.readAsStringSync()) as Map<String, Object?>;
+    for (final item in (json['items'] as List).cast<Map<String, Object?>>()) {
+      if (item['id'] != 'just_kit') continue;
+      ((item['versions'] as List).single as Map)['dependencies'] =
+          <String, String>{};
+    }
+    file.writeAsStringSync(jsonEncode(json));
+    final project = StoreProject(dir.path);
+    final plan = Planner(
+      StoreCatalog([('test', source, (await source.fetchIndex()).index)]),
+      ProjectState.read(project, await OverridesTarget.detect(project)),
+    ).install('just_kit');
+    await expectLater(
+      StoreInstaller(project: project, pub: FakePub()).apply(plan),
+      throwsA(
+        isA<InstallFailure>().having(
+          (e) => e.message,
+          'message',
+          contains('disagree on the store items it needs'),
+        ),
+      ),
+    );
+  });
+
+  test(
+    'a catalog claiming a recorded source id gets an id of its own',
+    () async {
+      final f = await Fixture.create();
+      await f.install('just_art_knight');
+      expect(f.project.readLock().sources.map((s) => s.id), ['just', 'test']);
+      // Another catalog, also calling itself "test".
+      final other = buildCatalog(tempDir('other'), [
+        TestItem('just_art_other'),
+      ]);
+      final plan = Planner(
+        StoreCatalog([('test', other, (await other.fetchIndex()).index)]),
+        ProjectState.read(f.project, await OverridesTarget.detect(f.project)),
+      ).install('just_art_other');
+      await f.installer.apply(plan);
+      final lock = f.project.readLock();
+      expect(lock.sources.map((s) => s.id), ['just', 'test', 'test-2']);
+      expect(lock.sources[1].url, '${f.source.indexUri}', reason: 'unchanged');
+      expect(lock.items['just_art_other']!.source, 'test-2');
+    },
+  );
 
   test('end to end with real pub get, then the generated files run', () async {
     // The project depends on stand-ins for the engine and the editor. The

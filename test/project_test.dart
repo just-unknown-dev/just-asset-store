@@ -1,5 +1,9 @@
-// The project-side pieces: lockfile, file hashes, pub's resolution files,
-// the SDK, the overrides target and the reference scan.
+// The project-side pieces on disk: the project and its lockfile file, file
+// hashes, pub's resolution files, the SDK, the overrides target and the
+// reference scan. The lockfile's own format is in lockfile_test.dart.
+@TestOn('vm')
+library;
+
 import 'dart:convert';
 import 'dart:io';
 
@@ -9,83 +13,53 @@ import 'package:test/test.dart';
 import 'support/temp_project.dart';
 
 void main() {
-  group('StoreLock', () {
-    final hash = Sha256.hexOf(utf8.encode('x'));
-    StoreLock sample() => StoreLock(
-      sources: const [
-        LockedSource('just-official', 'https://e.com/index.json'),
-      ],
-      items: {
-        'just_tiled': const LockedItem(
-          version: '^0.4.1',
-          kind: ItemKind.runtimeLibrary,
-          origin: ItemOrigin.hosted,
-        ),
-        'just_art_knight': LockedItem(
-          version: '1.2.0',
-          kind: ItemKind.content,
-          origin: ItemOrigin.vendored,
-          category: 'characters',
-          path: 'packages/characters/just_art_knight',
-          source: 'just-official',
-          archive: LockedArchive('https://e.com/k.zip', hash),
-          installedAt: DateTime.utc(2026, 10, 7),
-          files: {'pubspec.yaml': hash},
-        ),
-        'just_sprite_editor': const LockedItem(
-          version: '0.1.0',
-          kind: ItemKind.editorExtension,
-          origin: ItemOrigin.linked,
-          path: 'packages/just_sprite_editor',
-          registerModules: false,
-          entitlement: 'order-123',
-        ),
-      },
-    );
-
-    test('round-trips, sorted, as canonical JSON', () {
-      final text = sample().toText();
-      final again = StoreLock.parse(text);
-      expect(again.toText(), text);
-      expect(again.items.keys.toList(), [
-        'just_art_knight',
-        'just_sprite_editor',
-        'just_tiled',
-      ]);
-      expect(again.items['just_sprite_editor']!.registerModules, isFalse);
-      expect(again.items['just_sprite_editor']!.isDevDependency, isTrue);
-      expect(again.items['just_art_knight']!.files['pubspec.yaml'], hash);
-      expect(text, endsWith('}\n'));
-      expect(text, isNot(contains('\r')));
+  group('StoreRegistry', () {
+    test('generated files checked out with CRLF are up to date', () {
+      final dir = tempDir('proj');
+      final project = StoreProject(dir.path);
+      writeFiles(dir, {
+        StoreProject.modulesFile: StoreCodegen.modules(
+          const [],
+        ).replaceAll('\n', '\r\n'),
+        StoreProject.extensionsFile: StoreCodegen.extensions(
+          const [],
+        ).replaceAll('\n', '\r\n'),
+      });
+      expect(StoreRegistry.outdated(project), isEmpty);
+      expect(StoreRegistry.write(project), isEmpty, reason: 'nothing to write');
     });
 
-    test('edits return copies', () {
-      final lock = sample();
-      final fewer = lock.without('just_tiled');
-      expect(lock.items, contains('just_tiled'));
-      expect(fewer.items, isNot(contains('just_tiled')));
-      final more = fewer.withSource(
-        const LockedSource('studio', 'D:/packs/index.json'),
+    test('only the files a project can compile', () {
+      final kit = StoreLock(
+        items: {
+          'just_kit': const LockedItem(
+            version: '^1.0.0',
+            kind: ItemKind.runtimeLibrary,
+            origin: ItemOrigin.hosted,
+          ),
+        },
       );
-      expect(more.sources.map((s) => s.id), ['just-official', 'studio']);
-    });
-
-    test('refuses a damaged lockfile', () {
-      expect(
-        () => StoreLock.parse('{"schema": 1, "items": {"Bad": {}}}'),
-        throwsA(isA<StoreFormatException>()),
-      );
-      expect(
-        () => StoreLock.parse(
-          '{"schema": 1, "items": {"a": {"version": "1.0.0", "kind": "content", "origin": "vendored"}}}',
+      // Nothing installed and nothing generated yet: nothing is out of date.
+      final fresh = StoreProject(tempDir('fresh').path);
+      writeFiles(Directory(fresh.root), {'pubspec.yaml': pubspecOf('app')});
+      expect(StoreRegistry.wanted(fresh, StoreLock()), isEmpty);
+      expect(StoreRegistry.outdated(fresh), isEmpty);
+      // A plain Flutter project: no file that imports what it doesn't have.
+      expect(StoreRegistry.wanted(fresh, kit), isEmpty);
+      // A Just Game Engine project gets both.
+      final game = StoreProject(tempDir('game').path);
+      writeFiles(Directory(game.root), {
+        'pubspec.yaml': pubspecOf(
+          'game',
+          extra:
+              'dependencies:\n  just_game_engine: ^1.0.0\n'
+              'dev_dependencies:\n  just_game_engine_editor: ^0.1.0\n',
         ),
-        throwsA(isA<StoreFormatException>()),
-        reason: 'a vendored item records its folder',
-      );
-      expect(
-        () => StoreLock.parse('{"schema": 9}'),
-        throwsA(isA<StoreFormatException>()),
-      );
+      });
+      expect(StoreRegistry.wanted(game, kit), {
+        StoreProject.modulesFile,
+        StoreProject.extensionsFile,
+      });
     });
   });
 

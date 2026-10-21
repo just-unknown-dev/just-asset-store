@@ -10,6 +10,7 @@ import 'package:just_core_cli/fetch.dart';
 import '../catalog/item_manifest.dart';
 import '../catalog/json.dart';
 import '../catalog/store_index.dart';
+import '../version.dart';
 
 export 'package:just_core_cli/fetch.dart'
     show ByteProgress, CancelToken, CancelledException, FetchException;
@@ -53,6 +54,9 @@ final class SourceConfig {
     name: 'Just Asset Store',
   );
 
+  /// The id the [official] catalog gives itself (its `source.id`).
+  static const String officialId = 'just';
+
   /// Where the catalog is.
   final String url;
 
@@ -66,8 +70,11 @@ final class SourceConfig {
   bool get isRemote => url.startsWith('https://') || url.startsWith('http://');
 
   /// This config as JSON.
-  Map<String, Object?> toJson() =>
-      compactJson({'url': url, 'name': name, 'enabled': enabled ? null : false});
+  Map<String, Object?> toJson() => compactJson({
+    'url': url,
+    'name': name,
+    'enabled': enabled ? null : false,
+  });
 
   /// Reads one from [json].
   factory SourceConfig.fromJson(JsonFields json) => SourceConfig(
@@ -142,7 +149,77 @@ abstract class StoreSource {
     if (archive == null) {
       throw SourceException('${item.name} ${version.version} has no archive.');
     }
-    return resolve(archive.url);
+    final uri = resolve(archive.url);
+    // Plain http is only ever fetched from this machine: a catalog on the
+    // web must not make the store call this machine's own services.
+    if (uri.scheme == 'http' && indexUri.scheme == 'https') {
+      throw SourceException(
+        '${item.name} ${version.version}: a catalog on the web points its '
+        'archive at this machine, which the store refuses.',
+        uri: uri,
+      );
+    }
+    return uri;
+  }
+
+  /// The most pages a catalog may be split into.
+  static const int maxPages = 100;
+
+  /// [first], the catalog's first page, with every page its `next` links
+  /// lead to, read from this source: one catalog.
+  Future<StoreIndex> withPages(StoreIndex first) async {
+    if (first.next == null) return first;
+    final items = [...first.items];
+    final categories = {for (final c in first.categories) c.id: c};
+    final skipped = [...first.skipped];
+    final seen = {'$indexUri'};
+    var next = first.next;
+    for (var page = 2; next != null; page++) {
+      if (page > maxPages) {
+        throw SourceException(
+          'The catalog has more than $maxPages pages.',
+          uri: indexUri,
+        );
+      }
+      final uri = resolve(next);
+      if (!seen.add('$uri')) {
+        throw SourceException(
+          'The catalog\'s pages lead in a circle.',
+          uri: uri,
+        );
+      }
+      final StoreIndex part;
+      try {
+        part = StoreIndex.parse(
+          _utf8(await readBytes(uri, maxBytes: 32 * 1024 * 1024)),
+        );
+      } on StoreFormatException catch (e) {
+        throw e.inFile('$uri');
+      }
+      for (final c in part.categories) {
+        categories.putIfAbsent(c.id, () => c);
+      }
+      items.addAll(part.items);
+      skipped.addAll(part.skipped);
+      next = part.next;
+    }
+    final ids = <String>{};
+    for (final i in items) {
+      if (!ids.add(i.id)) {
+        throw StoreFormatException(
+          '"${i.id}" is listed on two of the catalog\'s pages.',
+          file: '$indexUri',
+        );
+      }
+    }
+    return StoreIndex(
+      source: first.source,
+      categories: categories.values.toList()
+        ..sort((a, b) => a.order.compareTo(b.order)),
+      items: items,
+      generatedAt: first.generatedAt,
+      skipped: skipped,
+    );
   }
 }
 
@@ -290,7 +367,8 @@ final class HttpStoreSource extends StoreSource {
 
   /// What the store tells servers it is.
   static const String userAgent =
-      'just_asset_store/0.1.0 (+https://github.com/just-unknown-dev/just-asset-store)';
+      'just_asset_store/$justAssetStoreVersion '
+      '(+https://github.com/just-unknown-dev/just-asset-store)';
 
   @override
   Future<FetchedIndex> fetchIndex({bool refresh = false}) async {
@@ -464,7 +542,12 @@ final class GitHubSource extends StoreSource {
     if (release != null) {
       final repo = GitHubRepo.tryParse('${release[1]}/${release[2]}');
       if (repo == null) return null;
-      return GitHubSource(repo, tag: release[3], cacheDir: cacheDir, client: client);
+      return GitHubSource(
+        repo,
+        tag: release[3],
+        cacheDir: cacheDir,
+        client: client,
+      );
     }
     final lower = url.toLowerCase();
     if (!lower.startsWith('https://github.com/') &&

@@ -1,0 +1,26 @@
+# Every push and pull request: analysis, formatting, the tests on the Dart
+# VM, the tests that need no files in Chrome — compiled to JavaScript and to
+# WebAssembly, as the library runs on the web — and what pub.dev would say.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+      - run: dart pub get
+      - run: dart analyze --fatal-infos
+      - run: dart format --output=none --set-exit-if-changed .
+      - run: dart test
+      - run: dart test -p chrome
+      - run: dart test -p chrome -c dart2wasm
+      - run: dart pub publish --dry-run

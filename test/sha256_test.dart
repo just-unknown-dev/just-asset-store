@@ -1,5 +1,8 @@
 // SHA-256 against the FIPS 180-4 / NIST test vectors, and the streaming
 // API against one-shot hashing.
+@TestOn('vm')
+library;
+
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';

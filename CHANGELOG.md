@@ -1,33 +1,15 @@
 # Changelog
 
-## [0.1.0] - unreleased
+## 0.1.0
 
-### Built on just_core_cli
+The first release of the Just Asset Store's core. It reads store catalogs, downloads and verifies items, and installs them into Just Game Engine projects as packages. It has no command-line tool of its own: its commands are a plugin of `just` (just_core_cli).
 
-- **No command-line tool of its own.** The store's commands are `just store ...` (and `just add` / `just remove`): a plugin of the `just` tool, run from the project with `dart run just_asset_store:just_plugin`. They gain per-command help, `--json`, `search`, `info`, `sources` and `cache`, and check their arguments before reading any catalog.
-- **The project toolkit moved to just_core_cli**: the pubspec editor, overrides, semver, JSON, names, SHA-256, ZIP, HTTP, the download cache, and the transaction and lock (now one lock in `.dart_tool/just_core_cli/`, shared with `just`; journals left in `.dart_tool/just_asset_store/` by a crash are still recovered). Every old name is re-exported; `StoreFormatException`, `StoreNames` and `SourceException` are typedefs of just_core_cli's. The store's own pieces stay here: its pubspec block (`storeBlock`, with the markers projects already hold — every store edit passes it to the editor) and its trash (`StoreProject.trashRoot`, the editor's `.editor_trash/store/`, passed to every transaction it opens).
-
-### Added
-
-- **Catalogs:**
-  - `index.json` and `just_store.json` models, with strict validation that names the failing field.
-  - Fields reserved for community publishers (trust, stats, takedowns) and paid items (pricing, entitled access, download brokers).
-- **Sources:**
-  - Folders, and `https` catalogs with ETag caching, an offline fallback, redirects and polite retries.
-  - A per-user download cache keyed by SHA-256.
-- **Archives:** a ZIP reader for untrusted archives, and a reproducible ZIP writer, both on `just_deflate`. Also SHA-256.
-- **The planner:**
-  - dependencies and version constraints
-  - checks against the project's Dart, Flutter, engine and editor versions
-  - items that depend on a changed item, name and folder clashes, and developer checkouts
-  - uninstall checks: code and scenes that still use the item, and dependencies nothing else needs
-- **Installs:** all-or-nothing transactions with a journal, backups, rollback, crash recovery and a project lock.
-- **Project files:**
-  - Edits of the pubspec files' marked blocks that keep every byte outside them.
-  - `pubspec_overrides.yaml` handling: write to the file pub reads, and mirror into `pubspec.yaml` when it is ignored by git.
-  - The generated module and extension registries.
-  - `restore` from the lockfile.
-- **Creator and catalog tools:**
-  - `just store pack`: reproducible archives, text files in LF, path checks.
-  - `just store index build|check|codeowners`.
-  - Catalog and item repository templates.
+- **Every platform.** `package:just_asset_store/just_asset_store.dart` runs wherever Dart does, the web included, compiled to JavaScript or WebAssembly: catalogs (`StoreIndex`), item manifests (`ItemManifest`), the package checks, run on an archive in memory (`PackageCheck`), the lockfile (`StoreLock`), the generated registries' text (`StoreCodegen`), the store's pubspec block (`storeBlock`), and just_core_cli's versions, JSON fields, names, SHA-256 and ZIP archives. Where `dart:io` is (Windows, macOS, Linux, Android, iOS), the library also holds the store on disk: `AssetStore` with its sources, planner and installer, restoring, linking, the creator tools and the commands.
+- **Commands:** `just store install|update|uninstall|list|search|info|restore|generate|link|unlink|vendor|sources|cache|template`, and for creators `pack`, `validate` and `index build|check|codeowners`. `just add` and `just remove` are shortcuts for `install` and `uninstall`; `just check` and `just doctor` run `store generate --check`. Each command has its own help and takes `--json`, `--yes`, `--verbose` and `--project`; arguments are checked before any catalog is read.
+- **Catalogs:** `index.json` and `just_store.json` models, with strict validation that names the failing field: display text without control characters, pictures only on the web or beside the catalog, libraries in generated code only as plain paths of the item's own package. An item of a kind this version doesn't know is left out, not a reason to refuse the catalog; a catalog split into pages (`next`) is read whole. Fields are reserved for community publishers (trust, stats, takedowns) and paid items (pricing, entitled access, download brokers).
+- **Sources:** folders; `https` catalogs with ETag caching, an offline fallback, redirects and polite retries; unlisted items straight from a GitHub release (`just store install https://github.com/<owner>/<repo>[@<tag>]`, read from its `just_release.json`; code from one is installed with `--yes` only together with `--unlisted`). Only the official catalog says which items the store vouches for: every other catalog's items are community items. A project's sources keep the order they were added in, the official catalog first. Downloads are kept in a per-user cache keyed by SHA-256.
+- **The planner:** the newest versions that fit together, going back on a choice when it leads nowhere; updates never go to an older version; versions the project's Dart, Flutter, engine and editor can run come first; items that depend on a changed item, name and folder clashes (in any letter case where the file system ignores it), and developer checkouts; installing an item already there as a dependency makes it one of the project's own; uninstall checks for code and scenes that still use the item, or a dependency that would go with it; versions taken down by their catalog are named in every plan.
+- **Installs:** every archive is checked against its pin (size and SHA-256), read as an untrusted ZIP, and checked as a package — file types, no build hooks or platform folders in any case, dependencies only by version from pub.dev or on an SDK, every registered library present, the manifest's dependencies equal to the catalog's — before the project is touched. Then all or nothing: a journal, backups, rollback, crash recovery, and the project lock `just` uses, which every command that changes the project holds. What an install replaces goes to the editor's trash, `.editor_trash/store/`.
+- **Project files:** edits only the store's marked blocks of `pubspec.yaml` and `pubspec_overrides.yaml`, keeping every other byte; writes to the file pub reads, and mirrors into `pubspec.yaml` when the overrides file is ignored by git. Generates `lib/editor/store_modules.g.dart` and `lib/game/store_extensions.g.dart` where the project can compile them, records `just_store.lock.json`, and `restore` rebuilds missing folders from it.
+- **Templates:** `just store template` lays a project template's files over a project — never into git's, pub's or the tools' own files — and installs what it needs, in one change.
+- **Creator tools:** `pack` writes a reproducible archive (text files in LF), the catalog's version file and `just_release.json`; `validate` checks a folder or an archive with the installer's own rules; `index build|check|codeowners` builds and checks a catalog repository (`codeowners --file` writes it as UTF-8; publishers' files are the maintainers' alone).

@@ -1,0 +1,11 @@
+name: your_item_name
+description: "Your item, for the Just Game Engine's Asset Store."
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+
+flutter:
+  assets:
+    - sprites/

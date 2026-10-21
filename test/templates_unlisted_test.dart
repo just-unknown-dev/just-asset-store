@@ -1,6 +1,9 @@
 // Templates, unlisted installs from GitHub, takedowns, and reading catalogs
 // from newer stores.
 
+@TestOn('vm')
+library;
+
 import 'dart:convert';
 import 'dart:io';
 
@@ -57,11 +60,7 @@ void main() {
               'versions': [
                 {
                   'version': '1.0.0',
-                  'archive': {
-                    'url': 'a.zip',
-                    'sha256': '0' * 64,
-                    'size': 1,
-                  },
+                  'archive': {'url': 'a.zip', 'sha256': '0' * 64, 'size': 1},
                 },
               ],
             },
@@ -95,8 +94,9 @@ void main() {
     test('refuses an item the store stopped offering', () async {
       final dir = tempDir('catalog');
       final source = buildCatalog(dir, [TestItem('just_art_knight')]);
-      final index = jsonDecode(File('${dir.path}/index.json').readAsStringSync())
-          as Map<String, dynamic>;
+      final index =
+          jsonDecode(File('${dir.path}/index.json').readAsStringSync())
+              as Map<String, dynamic>;
       ((index['items'] as List).single as Map)['unavailable'] = true;
       File('${dir.path}/index.json').writeAsStringSync(jsonEncode(index));
       final project = tempDir('proj');
@@ -156,15 +156,85 @@ void main() {
     });
   });
 
+  test('a template whose items cannot install changes nothing', () async {
+    final source = buildCatalog(tempDir('catalog'), [
+      TestItem(
+        'starter_game',
+        kind: ItemKind.template,
+        dependencies: {'just_gone': '^1.0.0'},
+        files: {'template/lib/main.dart': '// {{title}}\n'},
+      ),
+    ]);
+    final project = tempDir('proj');
+    writeFiles(project, {'pubspec.yaml': pubspecOf('rocket_run')});
+    final (code, out, _) = await store([
+      'template',
+      'starter_game',
+      '--project',
+      project.path,
+      '--source',
+      source.indexUri.toFilePath(),
+    ]);
+    expect(code, 1);
+    expect(out, contains('"just_gone" (needed by you) is not in any'));
+    expect(File('${project.path}/lib/main.dart').existsSync(), isFalse);
+  });
+
+  group('templates may not write', () {
+    for (final path in [
+      '.git/hooks/pre-commit',
+      '.dart_tool/just_core_cli/txn/1/journal.json',
+      'packages/x/.Dart_Tool/y.json',
+      'just_store.lock.json',
+      'just.json',
+      'pubspec_overrides.yaml',
+    ]) {
+      test(path, () async {
+        final source = buildCatalog(tempDir('catalog'), [
+          TestItem(
+            'starter_game',
+            kind: ItemKind.template,
+            files: {
+              'template/lib/main.dart': '// {{title}}\n',
+              'template/$path': '{}',
+            },
+          ),
+        ]);
+        final project = tempDir('proj');
+        writeFiles(project, {'pubspec.yaml': pubspecOf('rocket_run')});
+        final (code, _, err) = await store([
+          'template',
+          'starter_game',
+          '--overwrite',
+          '--project',
+          project.path,
+          '--source',
+          source.indexUri.toFilePath(),
+        ]);
+        expect(code, 1);
+        expect(err, contains(path));
+        expect(
+          File('${project.path}/lib/main.dart').existsSync(),
+          isFalse,
+          reason: 'nothing was changed',
+        );
+      });
+    }
+  });
+
   group('unlisted packages from GitHub', () {
     test('a URL names the repository and, after @, the release', () {
-      final latest = GitHubSource.tryFrom('https://github.com/studio/fancy-kit')!;
+      final latest = GitHubSource.tryFrom(
+        'https://github.com/studio/fancy-kit',
+      )!;
       expect('${latest.repo}', 'studio/fancy-kit');
       expect(
         '${latest.indexUri}',
         'https://github.com/studio/fancy-kit/releases/latest/download/just_release.json',
       );
-      final tagged = GitHubSource.tryFrom('github.com/studio/fancy-kit@v1.2.0')!;
+      final tagged = GitHubSource.tryFrom(
+        'github.com/studio/fancy-kit@v1.2.0',
+      )!;
       expect(tagged.tag, 'v1.2.0');
       final again = GitHubSource.tryFrom('${tagged.indexUri}')!;
       expect(again.tag, 'v1.2.0');

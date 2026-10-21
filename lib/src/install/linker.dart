@@ -12,11 +12,11 @@ import '../project/lockfile.dart';
 import '../project/overrides_target.dart';
 import '../project/pub_runner.dart';
 import '../project/pubspec_editor.dart';
-import '../project/registry.dart';
 import '../project/store_project.dart';
 import '../sources/store_source.dart';
 import '../tools/packer.dart';
 import 'installer.dart';
+import 'package_check.dart';
 import 'planner.dart';
 
 /// Links and vendors store items.
@@ -32,16 +32,17 @@ import 'planner.dart';
 /// the packages without the checkouts.
 abstract final class StoreLinker {
   /// Records the packages in [folders] (each with a `just_store.json`) as
-  /// linked items, and regenerates the registry files. Returns their ids.
+  /// linked items, and regenerates the registry files, all or nothing and
+  /// holding the project's lock. Returns their ids.
   ///
-  /// Throws [StoreFormatException] for a folder without a valid manifest.
+  /// Throws [StoreFormatException] for a folder without a valid manifest,
+  /// and [InstallFailure] while another change holds the lock.
   static List<String> link(
     StoreProject project,
     List<String> folders, {
     bool direct = true,
   }) {
-    var lock = project.readLock();
-    final ids = <String>[];
+    final linked = <String, LockedItem>{};
     for (final folder in folders) {
       // An absolute folder as it is; a relative one inside the project when
       // it is there, else from the current folder.
@@ -54,34 +55,33 @@ abstract final class StoreLinker {
       // Relative when it can be (`../engine/just_x`), so the lockfile does
       // not hold this machine's drive and folders.
       final path = project.pathTo(dir.absolute.path);
-      lock = lock.withItem(
-        manifest.id,
-        LockedItem(
-          version: '${manifest.version}',
-          kind: manifest.kind,
-          origin: ItemOrigin.linked,
-          category: manifest.category,
-          path: path.replaceAll(r'\', '/'),
-          direct: direct,
-          system: manifest.system,
-        ),
+      linked[manifest.id] = LockedItem(
+        version: '${manifest.version}',
+        kind: manifest.kind,
+        origin: ItemOrigin.linked,
+        category: manifest.category,
+        path: path.replaceAll(r'\', '/'),
+        direct: direct,
+        system: manifest.system,
       );
-      ids.add(manifest.id);
     }
-    project.writeLock(lock);
-    StoreRegistry.write(project);
-    return ids;
+    StoreInstaller.withLockSync(project, () {
+      var lock = project.readLock();
+      linked.forEach((id, item) => lock = lock.withItem(id, item));
+      StoreInstaller.saveLock(project, lock);
+    });
+    return linked.keys.toList();
   }
 
   /// Forgets the linked item [id] (its checkout stays) and regenerates the
-  /// registry files. False when [id] is not a linked item.
-  static bool unlink(StoreProject project, String id) {
-    final lock = project.readLock();
-    if (lock.items[id]?.origin != ItemOrigin.linked) return false;
-    project.writeLock(lock.without(id));
-    StoreRegistry.write(project);
-    return true;
-  }
+  /// registry files, as [link] does. False when [id] is not a linked item.
+  static bool unlink(StoreProject project, String id) =>
+      StoreInstaller.withLockSync(project, () {
+        final lock = project.readLock();
+        if (lock.items[id]?.origin != ItemOrigin.linked) return false;
+        StoreInstaller.saveLock(project, lock.without(id));
+        return true;
+      });
 
   /// Copies the linked items [ids] into `packages/{category}/{name}/` as
   /// ordinary installed items, in one install: their pubspec entries
@@ -122,7 +122,16 @@ abstract final class StoreLinker {
         );
         continue;
       }
-      final packed = Packer.pack(project.dir(locked.path!));
+      final PackResult packed;
+      try {
+        packed = Packer.pack(project.dir(locked.path!));
+      } on PackageCheckException catch (e) {
+        problems.add('$e');
+        continue;
+      } on StoreFormatException catch (e) {
+        problems.add('$id: $e');
+        continue;
+      }
       final m = packed.manifest;
       final archive = 'vendor/${packed.fileName}';
       files[archive] = packed.bytes;
@@ -185,43 +194,12 @@ abstract final class StoreLinker {
           ),
         ),
     ], const []);
-    final result = await StoreInstaller(
+    // A vendored copy came from a checkout, not a catalog: the lockfile
+    // records nothing to download it again from.
+    return StoreInstaller(
       project: project,
       pub: pub,
-    ).apply(plan, replacing: ids.toSet());
-    // A vendored copy came from a checkout, not a catalog: nothing to
-    // download it again from.
-    var fixed = project.readLock();
-    for (final id in ids) {
-      final item = fixed.items[id]!;
-      fixed = fixed.withItem(
-        id,
-        LockedItem(
-          version: item.version,
-          kind: item.kind,
-          origin: item.origin,
-          category: item.category,
-          path: item.path,
-          direct: item.direct,
-          installedAt: item.installedAt,
-          registerModules: item.registerModules,
-          registerExtensions: item.registerExtensions,
-          files: item.files,
-          entitlement: item.entitlement,
-          system: item.system,
-        ),
-      );
-    }
-    project.writeLock(
-      StoreLock(
-        sources: [
-          for (final s in fixed.sources)
-            if (s.id != 'local') s,
-        ],
-        items: fixed.items,
-      ),
-    );
-    return result;
+    ).apply(plan, replacing: ids.toSet(), unpinned: ids.toSet());
   }
 
   static ItemManifest _manifest(StoreProject package) {

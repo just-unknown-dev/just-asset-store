@@ -33,11 +33,18 @@ final class CatalogEntry {
 
 /// Every enabled source's catalog, merged. When two sources list the same
 /// id, the first source wins and the clash is reported.
+///
+/// How far the store vouches for an item ([StoreItem.trust]) is what its
+/// catalog says only when that catalog may say it: the official catalog,
+/// a catalog in a folder on this machine (one being built or tried out),
+/// or one made in memory. Every other catalog's items are community items,
+/// whatever it claims.
 final class StoreCatalog {
   /// The catalogs, in priority order.
   StoreCatalog(List<(String, StoreSource?, StoreIndex)> catalogs) {
     for (final (sourceId, source, index) in catalogs) {
-      for (final item in index.items) {
+      final vouches = _vouches(source);
+      for (var item in index.items) {
         final existing = _entries[item.id];
         if (existing != null) {
           clashes.add(
@@ -45,6 +52,9 @@ final class StoreCatalog {
             'the store uses ${existing.sourceId}.',
           );
           continue;
+        }
+        if (!vouches && item.trust != TrustLevel.community) {
+          item = item.withTrust(TrustLevel.community);
         }
         _entries[item.id] = CatalogEntry(sourceId, item, source: source);
       }
@@ -69,6 +79,16 @@ final class StoreCatalog {
   /// Every category, sorted.
   List<StoreCategory> get categories =>
       _categories.values.toList()..sort((a, b) => a.order.compareTo(b.order));
+
+  /// Whether [source]'s catalog may say how far the store vouches for its
+  /// items.
+  static bool _vouches(StoreSource? source) {
+    if (source == null) return true;
+    final uri = source.indexUri;
+    return uri.scheme == 'file' ||
+        uri.scheme == 'memory' ||
+        '$uri' == SourceConfig.official.url;
+  }
 }
 
 /// What a project has now, as the planner needs it.
@@ -193,6 +213,11 @@ enum ChangeKind {
 
   /// Taken out of the project.
   remove,
+
+  /// Installed already, as another item's dependency, and now on purpose
+  /// too: it joins the project's own dependencies, so it stays when what
+  /// needed it goes. Nothing is downloaded or replaced.
+  adopt,
 }
 
 /// One item a plan changes.
@@ -227,7 +252,7 @@ final class PlannedChange {
   /// The version going in, for installs and updates.
   final StoreItemVersion? version;
 
-  /// What is installed now, for updates and removals.
+  /// What is installed now, for updates, removals and adoptions.
   final LockedItem? current;
 
   /// Installed on purpose rather than as another item's dependency.
@@ -242,6 +267,9 @@ final class PlannedChange {
     if (!itemKind.isVendored || category == null) return current?.path;
     return StoreProject.packagePath(category, id);
   }
+
+  /// Whether new code comes in or goes: the editor restarts to load it.
+  bool get needsRestart => kind != ChangeKind.adopt && itemKind.needsRestart;
 }
 
 /// How much an issue matters.
@@ -277,14 +305,19 @@ final class PlanIssue {
 /// What an install, update or uninstall would do: shown in the preview,
 /// then handed to the installer.
 final class InstallPlan {
-  /// [changes] with [issues].
-  const InstallPlan(this.changes, this.issues);
+  /// [changes] with [issues], worked out from [catalog].
+  const InstallPlan(this.changes, this.issues, {this.catalog});
 
   /// The items it changes.
   final List<PlannedChange> changes;
 
   /// What the user should know, blockers first.
   final List<PlanIssue> issues;
+
+  /// The catalog it was planned from, when a [Planner] made it: the
+  /// installer checks each package against it (a package must not depend
+  /// on a store item it doesn't declare).
+  final StoreCatalog? catalog;
 
   /// Whether it can be applied: no blockers, something to do.
   bool get canApply =>
@@ -295,11 +328,17 @@ final class InstallPlan {
       issues.where((i) => i.level == IssueLevel.blocker);
 
   /// Whether the editor must restart afterwards: code changes.
-  bool get needsRestart => changes.any((c) => c.itemKind.needsRestart);
+  bool get needsRestart => changes.any((c) => c.needsRestart);
 
   /// The bytes to download (archives not cached may be fewer).
-  int get downloadBytes =>
-      changes.fold(0, (sum, c) => sum + (c.version?.archive?.size ?? 0));
+  int get downloadBytes => changes.fold(
+    0,
+    (sum, c) =>
+        sum +
+        (c.kind == ChangeKind.adopt || c.kind == ChangeKind.remove
+            ? 0
+            : c.version?.archive?.size ?? 0),
+  );
 }
 
 /// Plans changes to a project from its [state] and the [catalog].
@@ -314,24 +353,105 @@ final class Planner {
   final ProjectState state;
 
   /// Installs [id] — [version], or the newest that fits — with what it
-  /// needs.
+  /// needs. One installed already as another item's dependency becomes
+  /// one of the project's own ([ChangeKind.adopt]).
   InstallPlan install(String id, {Version? version}) => _resolve({
     id: version == null
         ? VersionConstraint.any
         : VersionConstraint.exactly(version),
   });
 
-  /// Updates [id] to the newest version that fits the items needing it.
-  InstallPlan update(String id) => _resolve({id: VersionConstraint.any});
+  /// Installs every item in [wanted], each at the newest version its
+  /// constraint and the rest allow, in one plan: what a project template
+  /// needs, say.
+  InstallPlan installAll(Map<String, VersionConstraint> wanted) =>
+      _resolve(wanted);
 
-  /// Updates every item installed on purpose.
-  InstallPlan updateAll() => _resolve({
-    for (final e in state.lock.items.entries)
-      if (e.value.direct &&
-          e.value.origin == ItemOrigin.vendored &&
-          catalog.entry(e.key) != null)
-        e.key: VersionConstraint.any,
-  });
+  /// Updates [id] to the newest version that fits the items needing it:
+  /// never to one older than is installed. Nothing to do when nothing newer
+  /// is available.
+  InstallPlan update(String id) {
+    final locked = state.lock.items[id];
+    if (locked == null) {
+      return _finish(const [], [
+        PlanIssue(
+          IssueLevel.blocker,
+          '"$id" is not installed: install it instead.',
+          id: id,
+        ),
+      ]);
+    }
+    final installed = state.installedVersion(id);
+    // A pub.dev library takes the newest constraint; a checkout says it is
+    // updated where it lives.
+    if (locked.origin != ItemOrigin.vendored ||
+        installed == null ||
+        catalog.entry(id) == null) {
+      return _resolve({id: VersionConstraint.any});
+    }
+    if (_newerThanInstalled(id) == null) {
+      final withdrawn = catalog.entry(id)?.item.unavailable ?? false;
+      return _finish(const [], [
+        PlanIssue(
+          IssueLevel.info,
+          withdrawn
+              ? '${_name(id)} is no longer offered; $installed stays.'
+              : '${_name(id)} $installed is the newest available.',
+          id: id,
+        ),
+      ]);
+    }
+    return _resolve({id: _floor(installed)});
+  }
+
+  /// Updates every item installed on purpose that has a newer version.
+  /// Items no longer offered stay as they are, and say so.
+  InstallPlan updateAll() {
+    final targets = <String, VersionConstraint>{};
+    final notes = <PlanIssue>[];
+    for (final e in state.lock.items.entries) {
+      final item = catalog.entry(e.key)?.item;
+      final installed = state.installedVersion(e.key);
+      if (!e.value.direct ||
+          e.value.origin != ItemOrigin.vendored ||
+          item == null ||
+          installed == null) {
+        continue;
+      }
+      if (item.unavailable) {
+        notes.add(
+          PlanIssue(
+            IssueLevel.info,
+            '${item.name} is no longer offered; $installed stays.',
+            id: e.key,
+          ),
+        );
+        continue;
+      }
+      if (_newerThanInstalled(e.key) != null) {
+        targets[e.key] = _floor(installed);
+      }
+    }
+    if (targets.isEmpty) return _finish(const [], notes);
+    final plan = _resolve(targets);
+    return _finish(plan.changes, [...plan.issues, ...notes]);
+  }
+
+  /// The newest available version of the installed [id] that is newer
+  /// than what is installed, or null.
+  Version? _newerThanInstalled(String id) {
+    final installed = state.installedVersion(id);
+    final item = catalog.entry(id)?.item;
+    if (installed == null || item == null || item.unavailable) return null;
+    return _floor(installed).bestOf([
+      for (final v in item.available)
+        if (v.version > installed) v.version,
+    ]);
+  }
+
+  /// [installed] or newer.
+  static VersionConstraint _floor(Version installed) =>
+      VersionConstraint.parse('>=$installed');
 
   /// The newest version of [id] a plain update would pick, when newer than
   /// what is installed.
@@ -342,16 +462,41 @@ final class Planner {
     return latest.version > installed ? latest : null;
   }
 
+  /// The installed items whose installed version its catalog has since
+  /// taken down (a licence problem, say), each as a warning.
+  List<PlanIssue> takedowns() => [
+    for (final id in state.lock.items.keys)
+      if (_takenDown(id) case final v?)
+        PlanIssue(
+          IssueLevel.warning,
+          '${_name(id)} ${v.version} was taken down by its catalog: update '
+          'it, or uninstall it.',
+          id: id,
+        ),
+  ];
+
+  StoreItemVersion? _takenDown(String id) {
+    final installed = state.installedVersion(id);
+    if (installed == null) return null;
+    final v = catalog.entry(id)?.item.versionOf(installed);
+    return v != null && v.blocked ? v : null;
+  }
+
   /// Removes [id], and the dependencies only it needed. [references] (from
   /// [ReferenceScan]) are what still use it.
+  ///
+  /// [referencesOf] finds what uses one of those dependencies, the folders
+  /// of the items going (the set it is given) left out: code that imports
+  /// one blocks the plan, as code importing [id] does.
   InstallPlan uninstall(
     String id, {
     List<PackageReference> references = const [],
+    List<PackageReference> Function(String id, Set<String> going)? referencesOf,
   }) {
     final issues = <PlanIssue>[];
     final locked = state.lock.items[id];
     if (locked == null) {
-      return InstallPlan(const [], [
+      return _finish(const [], [
         PlanIssue(IssueLevel.blocker, '"$id" is not installed.', id: id),
       ]);
     }
@@ -368,48 +513,9 @@ final class Planner {
       issues.add(
         PlanIssue(
           IssueLevel.blocker,
-          '${_name(id)} comes from your own checkout (${locked.path}); remove '
-          'it from your overrides instead.',
-          id: id,
-        ),
-      );
-    }
-    final needing = [
-      for (final other in state.lock.items.keys)
-        if (other != id && state.dependenciesOf(other).containsKey(id))
-          _name(other),
-    ];
-    if (needing.isNotEmpty) {
-      issues.add(
-        PlanIssue(
-          IssueLevel.blocker,
-          '${needing.join(', ')} ${needing.length == 1 ? 'needs' : 'need'} '
-          '${_name(id)}. Uninstall ${needing.length == 1 ? 'it' : 'them'} '
-          'first.',
-          id: id,
-        ),
-      );
-    }
-    final code = references.where((r) => r.kind == ReferenceKind.code);
-    if (code.isNotEmpty) {
-      issues.add(
-        PlanIssue(
-          IssueLevel.blocker,
-          'Your code still imports it: '
-          '${code.map((r) => '${r.file}:${r.line}').join(', ')}. Remove those '
-          'imports first.',
-          id: id,
-        ),
-      );
-    }
-    final assets = references.where((r) => r.kind != ReferenceKind.code);
-    if (assets.isNotEmpty) {
-      final files = assets.map((r) => r.file).toSet().toList()..sort();
-      issues.add(
-        PlanIssue(
-          IssueLevel.warning,
-          'These files still use it and will show missing assets or '
-          'unknown components: ${files.join(', ')}.',
+          '${_name(id)} comes from your own checkout (${locked.path}): unlink '
+          'it instead (`store unlink $id`), which leaves the checkout as it '
+          'is.',
           id: id,
         ),
       );
@@ -457,187 +563,164 @@ final class Planner {
         }
       }
     }
-    issues.sort((a, b) => a.level.index.compareTo(b.level.index));
-    return InstallPlan(changes, issues);
+    // What still needs it, among what stays: items that need each other go
+    // together.
+    final needing = [
+      for (final other in state.lock.items.keys)
+        if (!removed.contains(other) &&
+            state.dependenciesOf(other).containsKey(id))
+          _name(other),
+    ];
+    if (needing.isNotEmpty) {
+      issues.add(
+        PlanIssue(
+          IssueLevel.blocker,
+          '${needing.join(', ')} ${needing.length == 1 ? 'needs' : 'need'} '
+          '${_name(id)}. Uninstall ${needing.length == 1 ? 'it' : 'them'} '
+          'first.',
+          id: id,
+        ),
+      );
+    }
+    final code = references.where((r) => r.kind == ReferenceKind.code);
+    if (code.isNotEmpty) {
+      issues.add(
+        PlanIssue(
+          IssueLevel.blocker,
+          'Your code still imports it: '
+          '${code.map((r) => '${r.file}:${r.line}').join(', ')}. Remove those '
+          'imports first.',
+          id: id,
+        ),
+      );
+    }
+    final assets = references.where((r) => r.kind != ReferenceKind.code);
+    if (assets.isNotEmpty) {
+      final files = assets.map((r) => r.file).toSet().toList()..sort();
+      issues.add(
+        PlanIssue(
+          IssueLevel.warning,
+          'These files still use it and will show missing assets or '
+          'unknown components: ${files.join(', ')}.',
+          id: id,
+        ),
+      );
+    }
+    if (referencesOf != null) {
+      for (final c in changes) {
+        if (c.id == id) continue;
+        final code = [
+          for (final r in referencesOf(c.id, removed))
+            if (r.kind == ReferenceKind.code) '${r.file}:${r.line}',
+        ];
+        if (code.isEmpty) continue;
+        issues.add(
+          PlanIssue(
+            IssueLevel.blocker,
+            'Your code imports ${c.name}, which would go too, as nothing else '
+            'needs it: ${code.join(', ')}. Remove those imports, or install '
+            '${c.name} on purpose first (`store install ${c.id}`).',
+            id: c.id,
+          ),
+        );
+      }
+    }
+    return _finish(changes, issues);
   }
 
   // ---------------------------------------------------------------------
 
+  /// [changes] and [issues] as a plan: with the takedowns of what the plan
+  /// leaves in place, blockers first.
+  InstallPlan _finish(List<PlannedChange> changes, List<PlanIssue> issues) {
+    final changed = {for (final c in changes) c.id};
+    final all = [
+      ...issues,
+      for (final t in takedowns())
+        if (!changed.contains(t.id)) t,
+    ]..sort((a, b) => a.level.index.compareTo(b.level.index));
+    return InstallPlan(changes, all, catalog: catalog);
+  }
+
   InstallPlan _resolve(Map<String, VersionConstraint> targets) {
+    final resolver = _Resolver(this, targets);
+    final decided = resolver.solve();
     final issues = <PlanIssue>[];
-    final wants = <String, List<(VersionConstraint, String)>>{};
-    final chosen = <String, StoreItemVersion>{};
-    final queue = <String>[];
-
-    void want(String id, VersionConstraint c, String by) {
-      (wants[id] ??= []).add((c, by));
-      queue.add(id);
-    }
-
-    for (final e in targets.entries) {
-      want(e.key, e.value, 'you');
-    }
-    // What installed items need from anything this plan may change.
-    for (final other in state.lock.items.keys) {
-      if (targets.containsKey(other)) continue;
-      state.dependenciesOf(other).forEach((dep, c) {
-        (wants[dep] ??= []).add((c, _name(other)));
-      });
-    }
-
-    var steps = 0;
-    while (queue.isNotEmpty) {
-      if (++steps > 2000) {
-        issues.add(
-          const PlanIssue(
-            IssueLevel.blocker,
-            'The items depend on each other in a way the store cannot '
-            'settle.',
-          ),
-        );
-        break;
-      }
-      final id = queue.removeAt(0);
-      final constraints = wants[id]!;
-      final locked = state.lock.items[id];
-      final isTarget = targets.containsKey(id);
-
-      // A developer's own checkout stays as it is.
-      if (locked?.origin == ItemOrigin.linked ||
-          (locked == null && state.foreignOverrides.containsKey(id))) {
-        if (isTarget) {
-          issues.add(
-            PlanIssue(
-              IssueLevel.blocker,
-              '${_name(id)} comes from your own checkout; update it there.',
-              id: id,
-            ),
-          );
-        }
-        continue;
-      }
-
-      // Installed and good enough: leave it.
-      final installed = state.installedVersion(id);
-      if (!isTarget &&
-          installed != null &&
-          constraints.every((c) => c.$1.allows(installed))) {
-        continue;
-      }
-
-      final entry = catalog.entry(id);
-      if (entry == null) {
-        issues.add(
-          PlanIssue(
-            IssueLevel.blocker,
-            '"$id" (needed by ${constraints.map((c) => c.$2).join(', ')}) is '
-            'not in any of your sources.',
-            id: id,
-          ),
-        );
-        continue;
-      }
-      final item = entry.item;
-      if (item.kind == ItemKind.template) {
-        issues.add(
-          PlanIssue(
-            IssueLevel.blocker,
-            '${item.name} is a project template, not something to install: '
-            'start a project from it with `just create <folder> --template '
-            '${item.id}`.',
-            id: id,
-          ),
-        );
-        continue;
-      }
-      if (item.unavailable) {
-        issues.add(
-          PlanIssue(
-            IssueLevel.blocker,
-            '${item.name} is no longer offered: its repository was removed '
-            'or changed hands.',
-            id: id,
-          ),
-        );
-        continue;
-      }
-      final candidates = item.available
-          .where((v) => constraints.every((c) => c.$1.allows(v.version)))
-          .map((v) => v.version);
-      final pickVersion = VersionConstraint.any.bestOf(candidates);
-      if (pickVersion == null) {
-        final why = constraints.map((c) => '${c.$2} needs ${c.$1}').join('; ');
-        issues.add(
-          PlanIssue(
-            IssueLevel.blocker,
-            'No version of ${item.name} fits: $why. Available: '
-            '${item.available.map((v) => v.version).join(', ')}.',
-            id: id,
-          ),
-        );
-        continue;
-      }
-      final pick = item.versionOf(pickVersion)!;
-      if (chosen[id]?.version == pick.version) continue;
-      chosen[id] = pick;
-      pick.dependencies.forEach((dep, c) => want(dep, c, item.name));
-    }
-
     final changes = <PlannedChange>[];
-    for (final e in chosen.entries) {
-      final id = e.key;
-      final entry = catalog.entry(id)!;
-      final item = entry.item;
-      final v = e.value;
-      final locked = state.lock.items[id];
-      final installed = state.installedVersion(id);
-      if (installed != null && installed == v.version) {
-        if (targets.containsKey(id)) {
-          issues.add(
-            PlanIssue(
-              IssueLevel.info,
-              '${item.name} ${v.version} is already installed.',
-              id: id,
-            ),
-          );
+    if (decided == null) {
+      issues.add(resolver.failure);
+    } else {
+      for (final MapEntry(key: id, value: v) in decided.entries) {
+        if (v == null) continue; // Kept as it is.
+        final entry = catalog.entry(id)!;
+        final item = entry.item;
+        final locked = state.lock.items[id];
+        final installed = state.installedVersion(id);
+        final isTarget = targets.containsKey(id);
+        final unchanged =
+            (installed != null && installed == v.version) ||
+            (locked?.origin == ItemOrigin.hosted &&
+                locked!.version == '${v.pubConstraint ?? '^${v.version}'}');
+        if (unchanged) {
+          if (isTarget && locked != null && !locked.direct) {
+            changes.add(
+              PlannedChange(
+                id: id,
+                kind: ChangeKind.adopt,
+                itemKind: item.kind,
+                reason:
+                    'You asked; it was there for '
+                    '${_needers(id).join(', ')}',
+                entry: entry,
+                version: v,
+                current: locked,
+              ),
+            );
+          } else if (isTarget) {
+            issues.add(
+              PlanIssue(
+                IssueLevel.info,
+                '${item.name} ${v.version} is already installed.',
+                id: id,
+              ),
+            );
+          }
+          continue;
         }
-        continue;
-      }
-      if (locked?.origin == ItemOrigin.hosted &&
-          locked!.version == '${v.pubConstraint ?? '^${v.version}'}') {
-        continue;
-      }
-      changes.add(
-        PlannedChange(
+        final change = PlannedChange(
           id: id,
           kind: locked == null ? ChangeKind.install : ChangeKind.update,
           itemKind: item.kind,
-          reason: targets.containsKey(id)
+          reason: isTarget
               ? 'You asked'
-              : 'Needed by ${wants[id]!.map((c) => c.$2).toSet().join(', ')}',
+              : 'Needed by ${resolver.neededBy(id).join(', ')}',
           entry: entry,
           version: v,
           current: locked,
-          direct: targets.containsKey(id) || (locked?.direct ?? false),
-        ),
-      );
-      _checkChange(id, item, v, locked, issues);
+          direct: isTarget || (locked?.direct ?? false),
+        );
+        changes.add(change);
+        _checkChange(change, issues);
+      }
     }
     for (final c in catalog.clashes) {
       issues.add(PlanIssue(IssueLevel.info, c));
     }
-    issues.sort((a, b) => a.level.index.compareTo(b.level.index));
     changes.sort((a, b) => a.id.compareTo(b.id));
-    return InstallPlan(changes, issues);
+    return _finish(changes, issues);
   }
 
-  void _checkChange(
-    String id,
-    StoreItem item,
-    StoreItemVersion v,
-    LockedItem? locked,
-    List<PlanIssue> issues,
-  ) {
+  /// The installed items that need [id].
+  List<String> _needers(String id) => [
+    for (final other in state.lock.items.keys)
+      if (other != id && state.dependenciesOf(other).containsKey(id))
+        _name(other),
+  ];
+
+  void _checkChange(PlannedChange change, List<PlanIssue> issues) {
+    final id = change.id;
+    final item = change.entry!.item;
+    final v = change.version!;
     if (v.access == AccessLevel.entitled) {
       issues.add(
         PlanIssue(
@@ -661,7 +744,7 @@ final class Planner {
         );
       }
     });
-    if (locked == null) {
+    if (change.current == null) {
       final graphHasIt = state.graph?.nodes.containsKey(id) ?? false;
       if (graphHasIt && !state.foreignOverrides.containsKey(id)) {
         issues.add(
@@ -675,12 +758,13 @@ final class Planner {
       }
       if (item.kind.isVendored) {
         final path = StoreProject.packagePath(item.category, id);
-        if (state.existingFolders.contains(path)) {
+        final taken = _folderTaken(path);
+        if (taken != null) {
           issues.add(
             PlanIssue(
               IssueLevel.blocker,
-              '$path already exists, and the store did not put it there. Move '
-              'it away first.',
+              '$taken already exists, and the store did not put it there. '
+              'Move it away first.',
               id: id,
             ),
           );
@@ -688,16 +772,19 @@ final class Planner {
       }
     }
     if (v.nativePlugins.isNotEmpty) {
+      final plugins = v.nativePlugins.join(', ');
       issues.add(
         PlanIssue(
           IssueLevel.warning,
-          item.kind == ItemKind.editorExtension
-              ? '${item.name} brings native plugins '
-                    '(${v.nativePlugins.join(', ')}). It installs as a dev '
-                    'dependency, so release builds leave them out.'
-              : '${item.name} brings native plugins '
-                    '(${v.nativePlugins.join(', ')}) that build into every '
-                    'version of the game.',
+          item.kind == ItemKind.editorExtension && change.direct
+              ? '${item.name} brings native plugins ($plugins). It installs as '
+                    'a dev dependency, so release builds leave them out.'
+              : item.kind == ItemKind.editorExtension
+              ? '${item.name} brings native plugins ($plugins). It comes in as '
+                    "a dependency of the game's code, so they build into "
+                    'every version of the game.'
+              : '${item.name} brings native plugins ($plugins) that build '
+                    'into every version of the game.',
           id: id,
         ),
       );
@@ -730,6 +817,18 @@ final class Planner {
     }
   }
 
+  /// The existing folder [path] is, when one is — as written, or (on the
+  /// file systems that ignore case, Windows's and macOS's) in another case.
+  String? _folderTaken(String path) {
+    final caseless = Platform.isWindows || Platform.isMacOS;
+    for (final f in state.existingFolders) {
+      if (f == path || (caseless && f.toLowerCase() == path.toLowerCase())) {
+        return f;
+      }
+    }
+    return null;
+  }
+
   String _name(String id) =>
       catalog.entry(id)?.item.name ?? state.manifests[id]?.name ?? id;
 
@@ -738,4 +837,256 @@ final class Planner {
     'flutter' => 'Flutter',
     _ => key,
   };
+}
+
+/// Picks a version for every item a plan touches, going back on a choice
+/// when it leads nowhere.
+///
+/// What constrains an item: what was asked for ("you"), the installed
+/// items the plan keeps (by their manifests), and the versions it picks
+/// (by the catalog). An installed item the plan replaces stops
+/// constraining anything: its new version speaks for it. Installed items
+/// are kept while they fit, and replaced only when they must.
+final class _Resolver {
+  _Resolver(this.planner, this.targets);
+
+  final Planner planner;
+  final Map<String, VersionConstraint> targets;
+
+  /// Each decided item: the catalog version picked, or null to keep what
+  /// is installed (or a developer's checkout).
+  final Map<String, StoreItemVersion?> decided = {};
+
+  PlanIssue? _failure;
+  var _failureDepth = -1;
+  var _steps = 0;
+  var _gaveUp = false;
+
+  /// How many choices it tries before it says it cannot settle them.
+  static const int maxSteps = 20000;
+
+  ProjectState get _state => planner.state;
+  StoreCatalog get _catalog => planner.catalog;
+
+  /// Why no plan was found: the problem met deepest into the search.
+  PlanIssue get failure => _gaveUp || _failure == null
+      ? const PlanIssue(
+          IssueLevel.blocker,
+          'The items depend on each other in a way the store cannot settle.',
+        )
+      : _failure!;
+
+  /// Every item's decision, or null when none fits.
+  Map<String, StoreItemVersion?>? solve() => _search(0) ? decided : null;
+
+  /// The picked versions that need [id].
+  List<String> neededBy(String id) => [
+    for (final e in decided.entries)
+      if (e.key != id && (e.value?.dependencies.containsKey(id) ?? false))
+        planner._name(e.key),
+  ];
+
+  /// The items to decide, in the order they come up: what was asked for,
+  /// then what the picked versions need.
+  List<String> _wanted() {
+    final out = [...targets.keys];
+    final seen = out.toSet();
+    for (final v in decided.values) {
+      if (v == null) continue;
+      for (final dep in v.dependencies.keys.toList()..sort()) {
+        if (seen.add(dep)) out.add(dep);
+      }
+    }
+    return out;
+  }
+
+  /// What asks [id] for which versions, and who.
+  List<(VersionConstraint, String)> _constraintsOn(String id) {
+    final out = <(VersionConstraint, String)>[];
+    final target = targets[id];
+    if (target != null) out.add((target, 'you'));
+    for (final other in _state.lock.items.keys) {
+      if (other == id || decided[other] != null) continue;
+      final c = _state.dependenciesOf(other)[id];
+      if (c != null) out.add((c, planner._name(other)));
+    }
+    decided.forEach((other, v) {
+      if (other == id || v == null) return;
+      final c = v.dependencies[id];
+      if (c != null) out.add((c, planner._name(other)));
+    });
+    return out;
+  }
+
+  bool _search(int depth) {
+    if (++_steps > maxSteps) {
+      _gaveUp = true;
+      return false;
+    }
+    final wanted = _wanted();
+    // A choice made earlier that what was picked since rules out.
+    for (final id in wanted) {
+      if (!decided.containsKey(id)) continue;
+      final problem = _misfit(id, decided[id], _constraintsOn(id));
+      if (problem != null) {
+        _fail(depth, problem);
+        return false;
+      }
+    }
+    final next = wanted.where((id) => !decided.containsKey(id)).firstOrNull;
+    if (next == null) return true;
+    final (options, problem) = _options(next, _constraintsOn(next));
+    if (options.isEmpty) {
+      _fail(depth, problem!);
+      return false;
+    }
+    for (final option in options) {
+      decided[next] = option;
+      if (_search(depth + 1)) return true;
+      decided.remove(next);
+      if (_gaveUp) return false;
+    }
+    return false;
+  }
+
+  void _fail(int depth, PlanIssue problem) {
+    if (depth > _failureDepth) {
+      _failureDepth = depth;
+      _failure = problem;
+    }
+  }
+
+  /// Whether the item kept ([option] null) or picked fails [constraints].
+  PlanIssue? _misfit(
+    String id,
+    StoreItemVersion? option,
+    List<(VersionConstraint, String)> constraints,
+  ) {
+    final Version? version;
+    if (option != null) {
+      version = option.version;
+    } else {
+      final locked = _state.lock.items[id];
+      // A checkout, or a pub.dev library: pub checks those.
+      if (locked == null || locked.origin != ItemOrigin.vendored) return null;
+      version = _state.installedVersion(id);
+    }
+    if (version == null || constraints.every((c) => c.$1.allows(version!))) {
+      return null;
+    }
+    return _noFit(id, constraints);
+  }
+
+  /// What [id] may be, best first, or why it may be nothing.
+  (List<StoreItemVersion?>, PlanIssue?) _options(
+    String id,
+    List<(VersionConstraint, String)> constraints,
+  ) {
+    final locked = _state.lock.items[id];
+    final isTarget = targets.containsKey(id);
+    final name = planner._name(id);
+    // A developer's own checkout stays as it is.
+    if (locked?.origin == ItemOrigin.linked ||
+        (locked == null && _state.foreignOverrides.containsKey(id))) {
+      if (!isTarget) return (const [null], null);
+      return (
+        const <StoreItemVersion?>[],
+        PlanIssue(
+          IssueLevel.blocker,
+          '$name comes from your own checkout; update it there.',
+          id: id,
+        ),
+      );
+    }
+    final installed = _state.installedVersion(id);
+    final keep =
+        locked != null &&
+        !isTarget &&
+        (locked.origin == ItemOrigin.hosted ||
+            (installed != null &&
+                constraints.every((c) => c.$1.allows(installed))));
+    final entry = _catalog.entry(id);
+    if (entry == null) {
+      if (keep) return (const [null], null);
+      return (
+        const <StoreItemVersion?>[],
+        PlanIssue(
+          IssueLevel.blocker,
+          '"$id" (needed by ${constraints.map((c) => c.$2).join(', ')}) is '
+          'not in any of your sources.',
+          id: id,
+        ),
+      );
+    }
+    final item = entry.item;
+    if (item.kind == ItemKind.template) {
+      if (keep) return (const [null], null);
+      return (
+        const <StoreItemVersion?>[],
+        PlanIssue(
+          IssueLevel.blocker,
+          '${item.name} is a project template, not something to install: '
+          'start a project from it with `just create <folder> --template '
+          '${item.id}`.',
+          id: id,
+        ),
+      );
+    }
+    if (item.unavailable) {
+      if (keep) return (const [null], null);
+      return (
+        const <StoreItemVersion?>[],
+        PlanIssue(
+          IssueLevel.blocker,
+          '${item.name} is no longer offered: its repository was removed '
+          'or changed hands.',
+          id: id,
+        ),
+      );
+    }
+    final versions = [
+      for (final v in item.available)
+        if (constraints.every((c) => c.$1.allows(v.version)) &&
+            !(keep && v.version == installed))
+          v,
+    ]..sort(_preference);
+    final options = <StoreItemVersion?>[if (keep) null, ...versions];
+    if (options.isEmpty) return (options, _noFit(id, constraints));
+    return (options, null);
+  }
+
+  /// Versions this project can run before those it can't, releases before
+  /// pre-releases, newest first.
+  int _preference(StoreItemVersion a, StoreItemVersion b) {
+    final fa = _runsHere(a), fb = _runsHere(b);
+    if (fa != fb) return fa ? -1 : 1;
+    final pa = a.version.isPreRelease, pb = b.version.isPreRelease;
+    if (pa != pb) return pa ? 1 : -1;
+    return b.version.compareTo(a.version);
+  }
+
+  bool _runsHere(StoreItemVersion v) => v.requires.entries.every((e) {
+    final have = _state.environment[e.key];
+    return have == null || e.value.allows(have);
+  });
+
+  PlanIssue _noFit(String id, List<(VersionConstraint, String)> constraints) {
+    final item = _catalog.entry(id)?.item;
+    final available = [
+      for (final v in item?.available ?? const <StoreItemVersion>[])
+        '${v.version}',
+    ];
+    final why = constraints
+        .map(
+          (c) =>
+              c.$2 == 'you' ? 'you asked for ${c.$1}' : '${c.$2} needs ${c.$1}',
+        )
+        .join('; ');
+    return PlanIssue(
+      IssueLevel.blocker,
+      'No version of ${planner._name(id)} fits: $why. '
+      '${available.isEmpty ? 'None is available.' : 'Available: ${available.join(', ')}.'}',
+      id: id,
+    );
+  }
 }

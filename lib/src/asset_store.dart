@@ -1,5 +1,5 @@
 /// One project's store: its sources, cache, catalog, plans and installs —
-/// what the editor's store window and the `store` tool both drive.
+/// what the editor's store window and `just store` both drive.
 library;
 
 import 'dart:async';
@@ -117,12 +117,13 @@ final class AssetStore {
       try {
         final source = sourceFor(config);
         final fetched = await source.fetchIndex(refresh: refresh);
-        catalogs.add((fetched.index.source.id, source, fetched.index));
+        final index = await source.withPages(fetched.index);
+        catalogs.add((index.source.id, source, index));
         statuses.add(
           SourceStatus(
             config,
-            info: fetched.index.source,
-            items: fetched.index.items.length,
+            info: index.source,
+            items: index.items.length,
             offline: fetched.offline,
             error: fetched.error,
           ),
@@ -149,8 +150,12 @@ final class AssetStore {
   StoreInstaller installer() =>
       StoreInstaller(project: project, pub: pub, downloader: downloader);
 
-  /// What in the project still uses the installed item [id].
-  List<PackageReference> referencesTo(String id) {
+  /// What in the project still uses the installed item [id]. The folders of
+  /// the items in [ignoring] (going too) are not searched.
+  List<PackageReference> referencesTo(
+    String id, {
+    Set<String> ignoring = const {},
+  }) {
     final lock = project.readLock();
     final item = lock.items[id];
     ItemManifest? manifest;
@@ -171,17 +176,21 @@ final class AssetStore {
       componentTypes: manifest?.componentTypes ?? const [],
       alsoSearch: [
         for (final e in lock.items.entries)
-          if (e.key != id && e.value.path != null) e.value.path!,
+          if (e.key != id && !ignoring.contains(e.key) && e.value.path != null)
+            e.value.path!,
       ],
       excluding: path,
     );
   }
 
-  /// Plans removing [id], with what still uses it.
+  /// Plans removing [id], with what still uses it and the dependencies that
+  /// would go with it.
   Future<InstallPlan> planUninstall(String id, {StoreCatalog? catalog}) async =>
-      (await planner(
-        catalog: catalog,
-      )).uninstall(id, references: referencesTo(id));
+      (await planner(catalog: catalog)).uninstall(
+        id,
+        references: referencesTo(id),
+        referencesOf: (dep, going) => referencesTo(dep, ignoring: going),
+      );
 
   /// Downloads the locked items whose folders are missing.
   Future<RestoreResult> restore({

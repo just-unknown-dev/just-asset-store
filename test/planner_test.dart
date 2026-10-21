@@ -1,5 +1,8 @@
 // The planner: dependencies, version conflicts, what the project already
 // has, and every reason it refuses.
+@TestOn('vm')
+library;
+
 import 'dart:convert';
 import 'dart:io';
 
@@ -122,7 +125,10 @@ void main() {
     expect(forced.canApply, isFalse);
     expect(
       blockers(forced).single,
-      allOf(contains('just_user needs ^1.0.0'), contains('you needs 2.0.0')),
+      allOf(
+        contains('just_user needs ^1.0.0'),
+        contains('you asked for 2.0.0'),
+      ),
     );
     expect('${planner.availableUpdate('just_core')!.version}', '2.0.0');
   });
@@ -475,5 +481,387 @@ void main() {
     );
     expect('${state.installedVersion('just_kit')}', '1.0.0');
     expect(File('${dir.path}/just_store.lock.json').existsSync(), isTrue);
+  });
+
+  group('updates', () {
+    /// A catalog of [items], its JSON changed by [edit] first: versions
+    /// yanked, items withdrawn.
+    Future<StoreCatalog> edited(
+      List<TestItem> items,
+      void Function(Map<String, Map<String, Object?>> items) edit,
+    ) async {
+      final dir = tempDir('cat');
+      final source = buildCatalog(dir, items);
+      final file = File('${dir.path}/index.json');
+      final json = jsonDecode(file.readAsStringSync()) as Map<String, Object?>;
+      edit({
+        for (final i in json['items'] as List)
+          (i as Map<String, Object?>)['id'] as String: i,
+      });
+      file.writeAsStringSync(jsonEncode(json));
+      return StoreCatalog([
+        ('test', source, (await source.fetchIndex()).index),
+      ]);
+    }
+
+    ProjectState installed(Map<String, String> versions) => ProjectState(
+      lock: StoreLock(
+        items: {
+          for (final e in versions.entries)
+            e.key: locked(e.key, e.value, category: 'characters'),
+        },
+      ),
+    );
+
+    void yank(Map<String, Object?> item, String version) {
+      for (final v in item['versions'] as List) {
+        if ((v as Map)['version'] == version) v['yanked'] = true;
+      }
+    }
+
+    test('never go back to an older version', () async {
+      // 1.1.0 was withdrawn after this project installed it.
+      final catalog = await edited([
+        TestItem('k', versions: ['1.0.0', '1.1.0']),
+      ], (items) => yank(items['k']!, '1.1.0'));
+      final planner = Planner(catalog, installed({'k': '1.1.0'}));
+      for (final plan in [planner.update('k'), planner.updateAll()]) {
+        expect(plan.changes, isEmpty, reason: '${plan.issues}');
+        expect(plan.blockers, isEmpty);
+      }
+      expect(planner.update('k').issues.single.level, IssueLevel.info);
+
+      // A pre-release installed: a lower release is not an update, a newer
+      // pre-release is.
+      final pre = await catalogOf([
+        TestItem('p', versions: ['1.5.0', '2.0.0-beta.2']),
+      ]);
+      final update = Planner(pre, installed({'p': '2.0.0-beta.1'})).update('p');
+      expect('${update.changes.single.version!.version}', '2.0.0-beta.2');
+      final none = await catalogOf([
+        TestItem('p', versions: ['1.5.0']),
+      ]);
+      expect(
+        Planner(none, installed({'p': '2.0.0-beta.1'})).update('p').changes,
+        isEmpty,
+      );
+    });
+
+    test('of something not installed are refused', () async {
+      final catalog = await catalogOf([TestItem('k')]);
+      final plan = Planner(
+        catalog,
+        ProjectState(lock: StoreLock()),
+      ).update('k');
+      expect(plan.changes, isEmpty);
+      expect(blockers(plan).single, contains('not installed'));
+    });
+
+    test('of everything skip what is no longer offered', () async {
+      final catalog = await edited(
+        [
+          TestItem('good', versions: ['1.0.0', '1.1.0']),
+          TestItem('gone', versions: ['1.0.0', '1.1.0']),
+          TestItem('pulled', versions: ['1.0.0']),
+        ],
+        (items) {
+          items['gone']!['unavailable'] = true;
+          yank(items['pulled']!, '1.0.0');
+        },
+      );
+      final plan = Planner(
+        catalog,
+        installed({'good': '1.0.0', 'gone': '1.0.0', 'pulled': '1.0.0'}),
+      ).updateAll();
+      expect(plan.canApply, isTrue, reason: '${plan.issues}');
+      expect(plan.changes.map((c) => '${c.id} ${c.version!.version}'), [
+        'good 1.1.0',
+      ]);
+      expect(
+        plan.issues.map((i) => i.message),
+        contains(contains('no longer offered')),
+      );
+    });
+  });
+
+  group('resolving', () {
+    TestItem kit(
+      String id,
+      List<String> versions, [
+      Map<String, String>? deps,
+    ]) => TestItem(
+      id,
+      kind: ItemKind.kit,
+      category: 'kits',
+      versions: versions,
+      dependencies: deps ?? const {},
+    );
+
+    test("an update forgets what the versions it replaces needed", () async {
+      // d 1.0.0 → a ^1 → b ^1 installed; d 2.0.0 → a ^2 → b ^2 offered.
+      final dir = tempDir('cat');
+      final source = buildCatalog(dir, [
+        kit('a', ['1.0.0', '2.0.0']),
+        kit('b', ['1.0.0', '2.0.0']),
+        kit('d', ['1.0.0', '2.0.0']),
+      ]);
+      final file = File('${dir.path}/index.json');
+      final json = jsonDecode(file.readAsStringSync()) as Map<String, Object?>;
+      for (final item in (json['items'] as List).cast<Map<String, Object?>>()) {
+        for (final v
+            in (item['versions'] as List).cast<Map<String, Object?>>()) {
+          final major = (v['version'] as String).split('.').first;
+          v['dependencies'] = switch (item['id']) {
+            'd' => {'a': '^$major.0.0'},
+            'a' => {'b': '^$major.0.0'},
+            _ => <String, String>{},
+          };
+        }
+      }
+      file.writeAsStringSync(jsonEncode(json));
+      final catalog = StoreCatalog([
+        ('test', source, (await source.fetchIndex()).index),
+      ]);
+      final state = ProjectState(
+        lock: StoreLock(
+          items: {
+            'd': locked('d', '1.0.0'),
+            'a': locked('a', '1.0.0', direct: false),
+            'b': locked('b', '1.0.0', direct: false),
+          },
+        ),
+        manifests: {
+          'd': manifest('d', deps: {'a': '^1.0.0'}),
+          'a': manifest('a', deps: {'b': '^1.0.0'}),
+        },
+      );
+      final plan = Planner(catalog, state).updateAll();
+      expect(plan.canApply, isTrue, reason: '${plan.issues}');
+      expect(plan.changes.map((c) => '${c.id} ${c.version!.version}'), [
+        'a 2.0.0',
+        'b 2.0.0',
+        'd 2.0.0',
+      ]);
+    });
+
+    test('goes back on a choice that leads nowhere', () async {
+      // t needs x and z; x 2.0.0 needs y ^2, but z needs x below 2.0.0.
+      final dir = tempDir('cat');
+      final source = buildCatalog(dir, [
+        kit('t', ['1.0.0'], {'x': 'any', 'z': 'any'}),
+        kit('x', ['1.0.0', '2.0.0']),
+        kit('y', ['1.0.0', '2.0.0']),
+        kit('z', ['1.0.0'], {'x': '<2.0.0'}),
+      ]);
+      final file = File('${dir.path}/index.json');
+      final json = jsonDecode(file.readAsStringSync()) as Map<String, Object?>;
+      for (final item in (json['items'] as List).cast<Map<String, Object?>>()) {
+        if (item['id'] != 'x') continue;
+        for (final v
+            in (item['versions'] as List).cast<Map<String, Object?>>()) {
+          final major = (v['version'] as String).split('.').first;
+          v['dependencies'] = {'y': '^$major.0.0'};
+        }
+      }
+      file.writeAsStringSync(jsonEncode(json));
+      final catalog = StoreCatalog([
+        ('test', source, (await source.fetchIndex()).index),
+      ]);
+      final plan = Planner(
+        catalog,
+        ProjectState(lock: StoreLock()),
+      ).install('t');
+      expect(plan.canApply, isTrue, reason: '${plan.issues}');
+      expect(plan.changes.map((c) => '${c.id} ${c.version!.version}'), [
+        't 1.0.0',
+        'x 1.0.0',
+        'y 1.0.0',
+        'z 1.0.0',
+      ]);
+    });
+
+    test(
+      'a version the project can run before a newer one it cannot',
+      () async {
+        final dir = tempDir('cat');
+        final source = buildCatalog(dir, [
+          kit('k', ['1.0.0', '2.0.0']),
+        ]);
+        final file = File('${dir.path}/index.json');
+        final json =
+            jsonDecode(file.readAsStringSync()) as Map<String, Object?>;
+        final versions =
+            ((json['items'] as List).single as Map)['versions'] as List;
+        (versions.last as Map)['requires'] = {'just_game_engine': '^3.0.0'};
+        file.writeAsStringSync(jsonEncode(json));
+        final plan = Planner(
+          StoreCatalog([('test', source, (await source.fetchIndex()).index)]),
+          ProjectState(
+            lock: StoreLock(),
+            environment: {'just_game_engine': Version.parse('2.0.0')},
+          ),
+        ).install('k');
+        expect('${plan.changes.single.version!.version}', '1.0.0');
+        expect(plan.canApply, isTrue);
+      },
+    );
+
+    test(
+      'installing a dependency on purpose keeps it when the other goes',
+      () async {
+        final catalog = await catalogOf([
+          TestItem('art'),
+          kit('kit', ['1.0.0'], {'art': '^1.0.0'}),
+        ]);
+        final state = ProjectState(
+          lock: StoreLock(
+            items: {
+              'kit': locked('kit', '1.0.0'),
+              'art': locked(
+                'art',
+                '1.0.0',
+                direct: false,
+                category: 'characters',
+              ),
+            },
+          ),
+          manifests: {
+            'kit': manifest('kit', deps: {'art': '^1.0.0'}),
+          },
+        );
+        final plan = Planner(catalog, state).install('art');
+        expect(plan.canApply, isTrue);
+        final change = plan.changes.single;
+        expect(change.kind, ChangeKind.adopt);
+        expect(change.reason, contains('it was there for Kit'));
+        expect(plan.downloadBytes, 0);
+        expect(plan.needsRestart, isFalse);
+      },
+    );
+  });
+
+  test('items that need each other go together', () async {
+    final catalog = await catalogOf(const []);
+    final state = ProjectState(
+      lock: StoreLock(
+        items: {
+          'a': locked('a', '1.0.0'),
+          'b': locked('b', '1.0.0', direct: false),
+        },
+      ),
+      manifests: {
+        'a': manifest('a', deps: {'b': '^1.0.0'}),
+        'b': manifest('b', deps: {'a': '^1.0.0'}),
+      },
+    );
+    final plan = Planner(catalog, state).uninstall('a');
+    expect(plan.canApply, isTrue, reason: '${plan.issues}');
+    expect(plan.changes.map((c) => c.id), ['a', 'b']);
+  });
+
+  test('only the official catalog, or one on this machine, vouches', () async {
+    final index = StoreIndex(
+      source: const StoreSourceInfo('elsewhere', 'Elsewhere'),
+      categories: const [StoreCategory('kits', 'Kits')],
+      items: [
+        StoreItem(
+          id: 'their_kit',
+          name: 'Their Kit',
+          kind: ItemKind.kit,
+          category: 'kits',
+          versions: [StoreItemVersion(version: Version(1, 0, 0))],
+          // The default when a catalog says nothing: official.
+        ),
+      ],
+    );
+    TrustLevel trustFrom(String base) => StoreCatalog([
+      ('x', MemoryStoreSource(index, const {}, base: base), index),
+    ]).entry('their_kit')!.item.trust;
+    expect(trustFrom('https://catalog.example.com/'), TrustLevel.community);
+    expect(trustFrom('memory:/'), TrustLevel.official);
+    expect(
+      trustFrom(
+        SourceConfig.official.url.substring(
+          0,
+          SourceConfig.official.url.length - 'index.json'.length,
+        ),
+      ),
+      TrustLevel.official,
+    );
+  });
+
+  test('a version its catalog took down is named in every plan', () async {
+    final dir = tempDir('cat');
+    final source = buildCatalog(dir, [
+      TestItem('k', versions: ['1.0.0', '1.1.0']),
+      TestItem('other'),
+    ]);
+    final file = File('${dir.path}/index.json');
+    final json = jsonDecode(file.readAsStringSync()) as Map<String, Object?>;
+    final k = (json['items'] as List).cast<Map<String, Object?>>().first;
+    ((k['versions'] as List).first as Map)['blocked'] = true;
+    file.writeAsStringSync(jsonEncode(json));
+    final planner = Planner(
+      StoreCatalog([('test', source, (await source.fetchIndex()).index)]),
+      ProjectState(
+        lock: StoreLock(
+          items: {'k': locked('k', '1.0.0', category: 'characters')},
+        ),
+      ),
+    );
+    expect(
+      planner.install('other').issues.map((i) => i.message),
+      contains(contains('was taken down')),
+    );
+    final update = planner.update('k');
+    expect('${update.changes.single.version!.version}', '1.1.0');
+    expect(
+      update.issues.map((i) => i.message),
+      isNot(contains(contains('was taken down'))),
+      reason: 'the update replaces it',
+    );
+  });
+
+  test('uninstalling refuses to take a dependency your code imports', () async {
+    final catalog = await catalogOf([
+      TestItem('art'),
+      TestItem(
+        'kit',
+        kind: ItemKind.kit,
+        category: 'kits',
+        dependencies: {'art': '^1.0.0'},
+      ),
+    ]);
+    final state = ProjectState(
+      lock: StoreLock(
+        items: {
+          'kit': locked('kit', '1.0.0'),
+          'art': locked('art', '1.0.0', direct: false, category: 'characters'),
+        },
+      ),
+      manifests: {
+        'kit': manifest('kit', deps: {'art': '^1.0.0'}),
+      },
+    );
+    final searched = <String, Set<String>>{};
+    final plan = Planner(catalog, state).uninstall(
+      'kit',
+      referencesOf: (id, going) {
+        searched[id] = going;
+        return [
+          if (id == 'art')
+            const PackageReference(
+              'lib/main.dart',
+              1,
+              ReferenceKind.code,
+              "import 'package:art/art.dart';",
+            ),
+        ];
+      },
+    );
+    expect(plan.changes.map((c) => c.id), ['kit', 'art']);
+    expect(plan.canApply, isFalse);
+    expect(blockers(plan).single, contains('lib/main.dart:1'));
+    expect(searched['art'], {'kit', 'art'}, reason: 'their folders are going');
   });
 }

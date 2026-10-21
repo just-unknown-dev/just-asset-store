@@ -8,16 +8,16 @@
     {"id": "ui", "label": "Interface", "order": 60},
     {"id": "audio", "label": "Sound & music", "order": 70},
     {"id": "fonts", "label": "Fonts", "order": 80},
-    {"id": "templates", "label": "Level templates", "order": 90},
+    {"id": "levels", "label": "Levels", "order": 90},
     {"id": "editors", "label": "Editor tools", "order": 100},
     {"id": "kits", "label": "Genre kits", "order": 110},
     {"id": "libraries", "label": "Libraries", "order": 120},
-    {"id": "core", "label": "Editor core", "order": 130}
+    {"id": "starters", "label": "Project templates", "order": 130}
   ],
-  "maintainers": ["ju-skb"],
+  "maintainers": ["your-github-handle"],
   "source": {
-    "homepage": "https://github.com/just-unknown-dev/just-asset-store-catalog",
-    "id": "just-official",
-    "name": "Just Asset Store"
+    "homepage": "https://github.com/your-github-handle/your-catalog",
+    "id": "your-catalog",
+    "name": "Your catalog"
   }
 }

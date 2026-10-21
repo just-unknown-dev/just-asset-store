@@ -4,11 +4,12 @@ library;
 import 'dart:io';
 
 import 'package:just_core_cli/just_core_cli.dart';
-import 'package:just_core_cli/project.dart' show ProjectLock;
 
 import '../asset_store.dart';
 import '../catalog/store_index.dart';
+import '../install/installer.dart';
 import '../install/linker.dart';
+import '../install/package_check.dart';
 import '../install/planner.dart';
 import '../project/lockfile.dart';
 import '../project/registry.dart';
@@ -59,10 +60,11 @@ final class StoreCommand extends JustCommand {
 /// the cache and the SDK.
 abstract class StoreProjectCommand extends JustCommand {
   /// Adds the options for reading catalogs and running pub. Every store
-  /// command takes them, so a script can pass the same options to each;
-  /// [catalogs] is false for those that don't use them, which hides them
-  /// from its help.
-  StoreProjectCommand({bool catalogs = true}) {
+  /// command in a project accepts them, so a script can pass the same
+  /// options to each; [catalogs] is false for those that don't read
+  /// catalogs or run pub, which hides them from its help (but for
+  /// `--cache` when [cache] says it is used).
+  StoreProjectCommand({bool catalogs = true, bool? cache}) {
     {
       argParser
         ..addMultiOption(
@@ -77,7 +79,7 @@ abstract class StoreProjectCommand extends JustCommand {
           'cache',
           valueHelp: 'folder',
           help: 'Where downloads are kept (default: per user).',
-          hide: !catalogs,
+          hide: !(cache ?? catalogs),
         )
         ..addOption(
           'sdk',
@@ -95,7 +97,9 @@ abstract class StoreProjectCommand extends JustCommand {
   /// official one.
   List<SourceConfig> sourcesFor(StoreProject project) {
     final given = argResults!.multiOption('source');
-    if (given.isNotEmpty) return [for (final s in given) SourceConfig(s)];
+    if (given.isNotEmpty) {
+      return [for (final s in given) SourceConfig(here(s, url: true))];
+    }
     final locked = project.readLock().sources;
     if (locked.isNotEmpty) return [for (final s in locked) SourceConfig(s.url)];
     return const [SourceConfig.official];
@@ -105,9 +109,28 @@ abstract class StoreProjectCommand extends JustCommand {
   AssetStore storeFor(StoreProject project) => AssetStore(
     project: project,
     sources: sourcesFor(project),
-    cacheDir: argResults!.option('cache') ?? StorePaths.defaultCacheDir(),
-    sdkPath: argResults!.option('sdk'),
+    cacheDir: cacheDir,
+    sdkPath: switch (argResults!.option('sdk')) {
+      final sdk? => here(sdk),
+      null => null,
+    },
   );
+
+  /// The download cache: `--cache`, else the per-user one.
+  String? get cacheDir => switch (argResults!.option('cache')) {
+    final dir? => here(dir),
+    null => StorePaths.defaultCacheDir(),
+  };
+
+  /// [path] as the user typed it, from the folder they were in (`just`
+  /// runs the plugin in the project's folder). With [url], an address (a
+  /// web or `file:` URL, a GitHub repository) is left as it is.
+  String here(String path, {bool url = false}) =>
+      url &&
+          (RegExp(r'^[a-zA-Z][a-zA-Z0-9+.-]+:').hasMatch(path) ||
+              GitHubSource.tryFrom(path) != null)
+      ? path
+      : absoluteIn(path, context.workingDirectory);
 
   /// The catalog, saying which sources could not be read or are offline.
   Future<LoadedCatalog> loadCatalog(AssetStore store) async {
@@ -116,9 +139,29 @@ abstract class StoreProjectCommand extends JustCommand {
       if (s.error != null && s.items == 0 && !s.offline) {
         output.warn('Could not read ${s.name}: ${s.error}');
       }
-      if (s.offline) output.info('Offline: using the cached ${s.name} catalog.');
+      if (s.offline) {
+        output.info('Offline: using the cached ${s.name} catalog.');
+      }
     }
     return loaded;
+  }
+
+  /// [body], with the store's own failures — an install that failed and
+  /// was undone, a package refused, a download or a catalog that could not
+  /// be read — as this command's: their message and exit code 1, never an
+  /// unexpected error.
+  Future<T> storeFailures<T>(Future<T> Function() body) async {
+    try {
+      return await body();
+    } on InstallFailure catch (e) {
+      throw CommandFailure(e.message);
+    } on PackageCheckException catch (e) {
+      throw CommandFailure('$e');
+    } on FetchException catch (e) {
+      throw CommandFailure('$e');
+    } on DownloadException catch (e) {
+      throw CommandFailure(e.message);
+    }
   }
 
   /// Prints [plan], asks, and applies it. Exit code 0 when applied or
@@ -131,16 +174,18 @@ abstract class StoreProjectCommand extends JustCommand {
       output.info('Nothing was changed.');
       return 1;
     }
-    final result = await store.installer().apply(
-      plan,
-      onProgress: (p) => output.info('  $p'),
+    final result = await storeFailures(
+      () =>
+          store.installer().apply(plan, onProgress: (p) => output.info('  $p')),
     );
     output.line('Done.');
     for (final e in result.setupSnippets.entries) {
       output.line('\n${e.key} needs this in your game code:\n${e.value}');
     }
     if (result.needsRestart) {
-      output.line('\nRestart the editor (or hot restart) to load the new code.');
+      output.line(
+        '\nRestart the editor (or hot restart) to load the new code.',
+      );
     }
     output.result = {
       ...planJson(plan),
@@ -152,7 +197,8 @@ abstract class StoreProjectCommand extends JustCommand {
     return 0;
   }
 
-  /// Prints [plan] as the store always has.
+  /// Prints [plan]: each change with its reason, then each issue, or
+  /// "Nothing to do." when there is neither.
   void printPlan(InstallPlan plan) {
     if (plan.changes.isNotEmpty) output.line('Plan:');
     for (final c in plan.changes) {
@@ -161,6 +207,8 @@ abstract class StoreProjectCommand extends JustCommand {
         ChangeKind.update =>
           '~ update    ${c.id} ${c.current?.version} -> ${c.version!.version}',
         ChangeKind.remove => '- uninstall ${c.id}',
+        ChangeKind.adopt =>
+          '= keep      ${c.id} ${c.current?.version}, as one of yours',
       };
       output.line('  $what  (${c.reason})');
     }
@@ -190,7 +238,8 @@ abstract class StoreProjectCommand extends JustCommand {
         },
     ],
     'issues': [
-      for (final i in plan.issues) {'level': i.level.name, 'message': i.message},
+      for (final i in plan.issues)
+        {'level': i.level.name, 'message': i.message},
     ],
     'canApply': plan.canApply,
   };
@@ -198,6 +247,17 @@ abstract class StoreProjectCommand extends JustCommand {
 
 /// `just store install <id>[@<version>]` (and `just add`).
 final class InstallCommand extends StoreProjectCommand {
+  /// The command and its options.
+  InstallCommand() {
+    argParser.addFlag(
+      'unlisted',
+      negatable: false,
+      help:
+          'With --yes: install code from a GitHub repository that no catalog '
+          'lists, which nobody reviewed. Without it, --yes is not enough.',
+    );
+  }
+
   @override
   String get name => 'install';
 
@@ -237,7 +297,9 @@ final class InstallCommand extends StoreProjectCommand {
       );
     }
     final project = storeProject;
-    final release = (await github.fetchIndex(refresh: true)).index;
+    final release = (await storeFailures(
+      () => github.fetchIndex(refresh: true),
+    )).index;
     final item = release.items.single;
     output.warn(
       '${item.name} (${item.id}) is unlisted: it comes straight from '
@@ -245,12 +307,26 @@ final class InstallCommand extends StoreProjectCommand {
       '${item.kind.isCode ? 'It holds code that runs on your machine. ' : ''}'
       'Install it only if you trust ${github.repo.owner}.',
     );
+    // Code nobody reviewed is never installed by --yes alone: a script must
+    // say it means to.
+    if (item.kind.isCode && yes && !argResults!.flag('unlisted')) {
+      throw CommandFailure(
+        '${item.name} is unlisted code: add --unlisted to install it with '
+        '--yes.',
+      );
+    }
     final config = SourceConfig('${github.indexUri}', name: '${github.repo}');
     final store = AssetStore(
       project: project,
-      sources: [...sourcesFor(project), config],
-      cacheDir: argResults!.option('cache') ?? StorePaths.defaultCacheDir(),
-      sdkPath: argResults!.option('sdk'),
+      // First, so the item installed is the one just warned about, even
+      // when a catalog lists another under the same id; what it needs
+      // comes from the project's sources.
+      sources: [config, ...sourcesFor(project)],
+      cacheDir: cacheDir,
+      sdkPath: switch (argResults!.option('sdk')) {
+        final sdk? => here(sdk),
+        null => null,
+      },
     );
     final loaded = await loadCatalog(store);
     final planner = await store.planner(catalog: loaded.catalog);
@@ -322,9 +398,7 @@ final class ListCommand extends StoreProjectCommand {
   @override
   Future<int> run() async {
     final items = storeProject.readLock().items;
-    output.result = {
-      for (final e in items.entries) e.key: e.value.toJson(),
-    };
+    output.result = {for (final e in items.entries) e.key: e.value.toJson()};
     if (items.isEmpty) {
       output.line('No items installed.');
       return 0;
@@ -446,8 +520,24 @@ final class InfoCommand extends StoreProjectCommand {
     if (item.sourceRepo != null) output.line('  ${item.sourceRepo}');
     output.line('  versions:');
     for (final v in item.versions.reversed) {
-      final here = installed?.version == '${v.version}' ? '  (installed)' : '';
-      output.line('    ${v.version}$here');
+      final marks = [
+        if (installed?.version == '${v.version}') 'installed',
+        if (v.blocked) 'taken down' else if (v.yanked) 'withdrawn',
+      ];
+      output.line(
+        '    ${v.version}${marks.isEmpty ? '' : '  (${marks.join(', ')})'}',
+      );
+    }
+    final running = installed == null
+        ? null
+        : item.versionOf(
+            Version.tryParse(installed.version) ?? Version(0, 0, 0),
+          );
+    if (running != null && running.blocked) {
+      output.warn(
+        'The installed ${running.version} was taken down by its catalog: '
+        'update it, or uninstall it.',
+      );
     }
     return 0;
   }
@@ -475,10 +565,7 @@ final class RestoreCommand extends StoreProjectCommand {
     if (result.restored.isEmpty && result.problems.isEmpty) {
       output.line('Nothing is missing.');
     }
-    output.result = {
-      'restored': result.restored,
-      'problems': result.problems,
-    };
+    output.result = {'restored': result.restored, 'problems': result.problems};
     return result.problems.isEmpty ? 0 : 1;
   }
 }
@@ -518,7 +605,12 @@ final class GenerateCommand extends StoreProjectCommand {
       );
     }
     final problems = <String>[];
-    final written = StoreRegistry.write(project, problems: problems);
+    final written = await storeFailures(
+      () async => StoreInstaller.withLockSync(
+        project,
+        () => StoreRegistry.write(project, problems: problems),
+      ),
+    );
     for (final p in problems) {
       output.warn(p);
     }
@@ -552,7 +644,10 @@ final class LinkCommand extends StoreProjectCommand {
   @override
   Future<int> run() async {
     if (rest.isEmpty) throw const UsageFailure('link needs folders.');
-    final ids = StoreLinker.link(storeProject, rest);
+    final project = storeProject;
+    final ids = await storeFailures(
+      () async => StoreLinker.link(project, [for (final f in rest) here(f)]),
+    );
     output
       ..result = {'linked': ids}
       ..line('Linked ${ids.join(', ')}.');
@@ -577,7 +672,8 @@ final class UnlinkCommand extends StoreProjectCommand {
   @override
   Future<int> run() async {
     final id = singleArgument('an item id');
-    if (!StoreLinker.unlink(storeProject, id)) {
+    final project = storeProject;
+    if (!await storeFailures(() async => StoreLinker.unlink(project, id))) {
       throw CommandFailure('$id is not a linked item.');
     }
     output
@@ -606,7 +702,9 @@ final class VendorCommand extends StoreProjectCommand {
     if (rest.isEmpty) throw const UsageFailure('vendor needs item ids.');
     final project = storeProject;
     final store = storeFor(project);
-    final result = await StoreLinker.vendor(project, rest, pub: store.pub);
+    final result = await storeFailures(
+      () => StoreLinker.vendor(project, rest, pub: store.pub),
+    );
     for (final c in result.changes) {
       output.line('Vendored ${c.id} into ${c.path}.');
     }
@@ -621,6 +719,9 @@ final class VendorCommand extends StoreProjectCommand {
 
 /// `just store sources [add <url> | remove <id|url>]`.
 final class SourcesCommand extends StoreProjectCommand {
+  /// Lists, adds and removes the project's catalogs.
+  SourcesCommand() : super(catalogs: false);
+
   @override
   String get name => 'sources';
 
@@ -638,7 +739,7 @@ final class SourcesCommand extends StoreProjectCommand {
     final lock = project.readLock();
     if (rest.isEmpty) {
       final shown = lock.sources.isEmpty
-          ? [LockedSource('official', SourceConfig.official.url)]
+          ? [LockedSource(SourceConfig.officialId, SourceConfig.official.url)]
           : lock.sources;
       output.result = [for (final s in shown) s.toJson()];
       if (lock.sources.isEmpty) {
@@ -650,39 +751,78 @@ final class SourcesCommand extends StoreProjectCommand {
       return 0;
     }
     if (rest.length != 2 || (rest.first != 'add' && rest.first != 'remove')) {
-      throw const UsageFailure('Use: sources, sources add <url>, or '
-          'sources remove <id|url>.');
+      throw const UsageFailure(
+        'Use: sources, sources add <url>, or '
+        'sources remove <id|url>.',
+      );
     }
     final target = rest[1];
-    final StoreLock next;
+    // What to add is read first (from the web, maybe); the lockfile is read
+    // and written holding the project's lock, so no other change is lost.
+    LockedSource? adding;
+    var items = 0;
     if (rest.first == 'add') {
-      final config = SourceConfig(target);
-      final source = storeFor(project).sourceFor(config);
-      final fetched = await source.fetchIndex(refresh: true);
-      final id = fetched.index.source.id;
-      next = lock.withSource(LockedSource(id, '${source.indexUri}'));
-      output.line('Added $id (${fetched.index.items.length} items).');
-    } else {
-      final keep = [
-        for (final s in lock.sources)
-          if (s.id != target && s.url != target) s,
-      ];
-      if (keep.length == lock.sources.length) {
-        throw CommandFailure('No source "$target" in this project.');
-      }
-      next = StoreLock(
-        sources: keep,
-        items: lock.items,
-        generator: lock.generator,
-      );
-      output.line('Removed $target.');
+      final config = SourceConfig(here(target, url: true));
+      final (source, fetched) = await storeFailures(() async {
+        final source = storeFor(project).sourceFor(config);
+        return (source, await source.fetchIndex(refresh: true));
+      });
+      adding = LockedSource(fetched.index.source.id, '${source.indexUri}');
+      items = fetched.index.items.length;
     }
-    final lockFile = ProjectLock.acquire(project);
-    try {
-      project.writeLock(next);
-    } finally {
-      lockFile.release();
-    }
+    final next = await storeFailures(
+      () async => StoreInstaller.withLockSync(project, () {
+        final lock = project.readLock();
+        final StoreLock next;
+        if (adding != null) {
+          // A project with none recorded reads the official catalog: adding
+          // a source adds to it, never replaces it.
+          final current = lock.sources.isNotEmpty
+              ? lock.sources
+              : [
+                  LockedSource(
+                    SourceConfig.officialId,
+                    SourceConfig.official.url,
+                  ),
+                ];
+          final clash = current.where(
+            (s) => s.id == adding!.id && s.url != adding.url,
+          );
+          if (clash.isNotEmpty) {
+            throw CommandFailure(
+              'The catalog at ${adding.url} calls itself "${adding.id}", as '
+              '${clash.first.url} does. Remove that one first if this one '
+              'replaces it.',
+            );
+          }
+          next = StoreLock(
+            sources: current,
+            items: lock.items,
+            generator: lock.generator,
+          ).withSource(adding);
+        } else {
+          final keep = [
+            for (final s in lock.sources)
+              if (s.id != target && s.url != target) s,
+          ];
+          if (keep.length == lock.sources.length) {
+            throw CommandFailure('No source "$target" in this project.');
+          }
+          next = StoreLock(
+            sources: keep,
+            items: lock.items,
+            generator: lock.generator,
+          );
+        }
+        project.writeLock(next);
+        return next;
+      }),
+    );
+    output.line(
+      adding != null
+          ? 'Added ${adding.id} ($items items).'
+          : 'Removed $target.',
+    );
     output.result = [for (final s in next.sources) s.toJson()];
     return 0;
   }
@@ -691,7 +831,7 @@ final class SourcesCommand extends StoreProjectCommand {
 /// `just store cache [clean]`.
 final class CacheCommand extends StoreProjectCommand {
   /// Shows or clears the per-user download cache (--cache names another).
-  CacheCommand();
+  CacheCommand() : super(catalogs: false, cache: true);
 
   @override
   String get name => 'cache';
@@ -706,7 +846,7 @@ final class CacheCommand extends StoreProjectCommand {
 
   @override
   Future<int> run() async {
-    final dir = argResults!.option('cache') ?? StorePaths.defaultCacheDir();
+    final dir = cacheDir;
     if (dir == null) {
       throw const CommandFailure('There is no home folder for a cache.');
     }

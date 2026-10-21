@@ -1,11 +1,11 @@
 /// The store's block in a project's pubspecs, and the pubspec editor it
-/// uses — just_core_cli's, which the store builds on. Re-exported here so
-/// the store's own imports, and the editor's, stay as they were.
+/// uses: just_core_cli's, which the store builds on.
 library;
 
-import 'package:just_core_cli/project.dart';
+import 'package:just_core_cli/just_core_cli.dart'
+    show ManagedBlock, PubspecEditor;
 
-export 'package:just_core_cli/project.dart'
+export 'package:just_core_cli/just_core_cli.dart'
     show
         DependencySpec,
         PathDependency,
@@ -16,7 +16,7 @@ export 'package:just_core_cli/project.dart'
         ManagedBlock;
 
 /// The Asset Store's block in `pubspec.yaml` and `pubspec_overrides.yaml`:
-/// the entries it installs, between the markers projects already hold.
+/// the entries it installs, between its `just_asset_store managed` markers.
 ///
 /// ```yaml
 /// dependency_overrides:

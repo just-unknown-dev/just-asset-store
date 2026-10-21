@@ -7,7 +7,13 @@
   },
   "id": "just_asset_store",
   "kind": "editor-extension",
+  "license": {
+    "spdx": "BSD-3-Clause"
+  },
   "name": "Asset Store core",
+  "requires": {
+    "sdk": "^3.11.0"
+  },
   "schema": 1,
   "system": true,
   "version": "0.1.0"

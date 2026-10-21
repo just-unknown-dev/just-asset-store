@@ -5,6 +5,7 @@ import '../catalog/json.dart';
 import '../catalog/names.dart';
 import '../catalog/store_index.dart';
 import '../crypto/sha256.dart';
+import '../version.dart';
 
 /// Where an installed item's code comes from.
 enum ItemOrigin {
@@ -63,6 +64,9 @@ final class LockedItem {
   /// Reads one from [json].
   factory LockedItem.fromJson(JsonFields json) {
     final archive = json.optObject('archive');
+    if (archive != null && !isSha256Hex(archive.string('sha256'))) {
+      throw archive.error('sha256', 'Expected 64 lowercase hex digits.');
+    }
     final registry = json.optObject('registry');
     final origin = json.choice('origin', ItemOrigin.byId);
     final path = json.optString('path');
@@ -251,7 +255,24 @@ final class StoreLock {
         if (!StoreNames.isId(id)) {
           throw raw.error(id, '"$id" is not an item id.');
         }
-        items[id] = LockedItem.fromJson(raw.object(id));
+        final item = LockedItem.fromJson(raw.object(id));
+        // The store moves, replaces and restores a vendored item's folder,
+        // so it must be the one the store gave it: never a path that leads
+        // elsewhere in the project, or out of it.
+        if (item.origin == ItemOrigin.vendored) {
+          final category = item.category;
+          if (category == null || !StoreNames.isCategory(category)) {
+            throw raw.error(id, 'A vendored item records its category.');
+          }
+          final want = 'packages/$category/$id';
+          if (item.path != want) {
+            throw raw.error(
+              id,
+              'A vendored item lives in "$want", not "${item.path}".',
+            );
+          }
+        }
+        items[id] = item;
       }
     }
     return StoreLock(
@@ -285,15 +306,16 @@ final class StoreLock {
   StoreLock without(String id) =>
       StoreLock(sources: sources, items: {...items}..remove(id));
 
-  /// A copy that records [source], replacing one with the same id.
-  StoreLock withSource(LockedSource source) => StoreLock(
-    sources: [
-      for (final s in sources)
-        if (s.id != source.id) s,
-      source,
-    ]..sort((a, b) => a.id.compareTo(b.id)),
-    items: items,
-  );
+  /// A copy that records [source]: in place of one with the same id, else
+  /// after the others. Sources keep the order they were added in, which is
+  /// their priority: the first that lists an id is where it comes from.
+  StoreLock withSource(LockedSource source) {
+    final at = sources.indexWhere((s) => s.id == source.id);
+    return StoreLock(
+      sources: at < 0 ? [...sources, source] : ([...sources]..[at] = source),
+      items: items,
+    );
+  }
 
   /// This lockfile as JSON, stamped with [generator].
   Map<String, Object?> toJson({String generator = storeGenerator}) => {
@@ -308,4 +330,4 @@ final class StoreLock {
 }
 
 /// What the store writes into the files it generates.
-const String storeGenerator = 'just_asset_store 0.1.0';
+const String storeGenerator = 'just_asset_store $justAssetStoreVersion';

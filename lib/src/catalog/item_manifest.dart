@@ -5,6 +5,7 @@ library;
 import '../archive/safe_paths.dart';
 import 'json.dart';
 import 'names.dart';
+import 'plain_text.dart';
 import 'semver.dart';
 import 'store_index.dart';
 
@@ -203,7 +204,7 @@ final class ItemManifest {
 
     return ItemManifest(
       id: id,
-      name: json.string('name'),
+      name: plainText(json, 'name', json.string('name')),
       version: json.version('version'),
       kind: kind,
       category: category,
@@ -215,7 +216,14 @@ final class ItemManifest {
       extensions: extensions,
       componentTypes: componentTypes,
       setupFile: setup?.optString('file'),
-      setupSnippet: setup?.optString('snippet'),
+      setupSnippet: setup == null
+          ? null
+          : optPlainText(
+              setup,
+              'snippet',
+              setup.optString('snippet'),
+              lines: true,
+            ),
       assetFolders: folders,
       entryPoints: entryPoints,
       previews: json.strings('previews'),
@@ -318,11 +326,19 @@ final class ItemManifest {
   });
 }
 
+/// A library path inside `lib/` as the generated files may import it:
+/// folders and a file of letters, digits, `_`, `-` and `.`, ending in
+/// `.dart`. Nothing that could end the import's string or start another
+/// directive.
+final RegExp _libraryPath = RegExp(
+  r'^(?:[A-Za-z0-9_][A-Za-z0-9_.-]*/)*[A-Za-z0-9_][A-Za-z0-9_.-]*\.dart$',
+);
+
 String _library(JsonFields json, String id) {
   final lib = json.string('library');
   final prefix = 'package:$id/';
   final rest = lib.startsWith(prefix) ? lib.substring(prefix.length) : null;
-  if (rest == null || !rest.endsWith('.dart') || !SafePaths.isSafe(rest)) {
+  if (rest == null || !_libraryPath.hasMatch(rest) || !SafePaths.isSafe(rest)) {
     throw json.error(
       'library',
       'Expected a library of this package, like "${prefix}editor.dart".',

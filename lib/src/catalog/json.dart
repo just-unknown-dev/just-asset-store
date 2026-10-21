@@ -1,12 +1,14 @@
-/// Moved to `package:just_core_cli`, which the store now builds on. Re-exported
-/// here so the store's own imports, and the editor's, stay as they were.
+/// Reading and writing the store's JSON files, with just_core_cli's
+/// [JsonFields], which the store builds on.
 library;
 
-import 'package:just_core_cli/project.dart' show JsonFormatException;
+import 'package:just_core_cli/just_core_cli.dart'
+    show JsonFields, JsonFormatException;
 
-export 'package:just_core_cli/project.dart'
+export 'package:just_core_cli/just_core_cli.dart'
     show JsonFields, JsonFormatException, canonicalJson, compactJson;
 
-/// The store's name for [JsonFormatException], kept so code that throws or
-/// catches it still does.
+/// A catalog, manifest or lockfile that is not what the store reads: the
+/// store's name for [JsonFormatException], which says which field and, with
+/// `inFile`, which file.
 typedef StoreFormatException = JsonFormatException;

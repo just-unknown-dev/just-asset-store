@@ -4,6 +4,7 @@ library;
 import '../crypto/sha256.dart';
 import 'json.dart';
 import 'names.dart';
+import 'plain_text.dart';
 import 'semver.dart';
 
 /// What an item is, which decides how it installs.
@@ -98,7 +99,11 @@ final class StoreLicense {
   /// Reads one from [json].
   factory StoreLicense.fromJson(JsonFields json) => StoreLicense(
     json.string('spdx'),
-    attribution: json.optString('attribution'),
+    attribution: optPlainText(
+      json,
+      'attribution',
+      json.optString('attribution'),
+    ),
     file: json.optString('file'),
   );
 
@@ -122,8 +127,10 @@ final class StoreAuthor {
   const StoreAuthor(this.name, {this.url});
 
   /// Reads one from [json].
-  factory StoreAuthor.fromJson(JsonFields json) =>
-      StoreAuthor(json.string('name'), url: json.optString('url'));
+  factory StoreAuthor.fromJson(JsonFields json) => StoreAuthor(
+    plainText(json, 'name', json.string('name')),
+    url: json.optString('url'),
+  );
 
   /// Their name.
   final String name;
@@ -304,7 +311,7 @@ final class StoreItemVersion {
       published: json.optTime('published'),
       yanked: json.flag('yanked'),
       blocked: json.flag('blocked'),
-      notes: json.optString('notes'),
+      notes: optPlainText(json, 'notes', json.optString('notes'), lines: true),
       archive: archive == null ? null : StoreArchive.fromJson(archive),
       broker: broker,
       access: access,
@@ -445,6 +452,14 @@ final class StoreItem {
     if (kind == ItemKind.runtimeLibrary && pub == null) {
       throw json.error('pub', 'A runtime library names its pub.dev package.');
     }
+    // The store adds it to the pubspec under its id: the package pub
+    // fetches must be the one the catalog names.
+    if (pub != null && pub.string('package') != id) {
+      throw pub.error(
+        'package',
+        'An item\'s id is its package\'s name, so this must be "$id".',
+      );
+    }
     final versions = [
       for (final v in json.objects('versions'))
         StoreItemVersion.fromJson(v, kind),
@@ -462,17 +477,24 @@ final class StoreItem {
     final pricing = json.optObject('pricing');
     return StoreItem(
       id: id,
-      name: json.string('name'),
+      name: plainText(json, 'name', json.string('name')),
       kind: kind,
       category: category,
       versions: versions,
-      summary: json.optString('summary') ?? '',
-      description: json.optString('description'),
-      tags: json.strings('tags'),
+      summary: optPlainText(json, 'summary', json.optString('summary')) ?? '',
+      description: optPlainText(
+        json,
+        'description',
+        json.optString('description'),
+        lines: true,
+      ),
+      tags: [for (final t in json.strings('tags')) plainText(json, 'tags', t)],
       author: author == null ? null : StoreAuthor.fromJson(author),
       license: license == null ? null : StoreLicense.fromJson(license),
-      thumbnail: json.optString('thumbnail'),
-      previews: json.strings('previews'),
+      thumbnail: _optUrl(json, 'thumbnail'),
+      previews: [
+        for (final p in json.strings('previews')) _url(json, 'previews', p),
+      ],
       publisher: json.optString('publisher') ?? 'just',
       trust: json.choice(
         'trust',
@@ -562,6 +584,31 @@ final class StoreItem {
   /// Whether it is made by the store's own team.
   bool get isOfficial => trust == TrustLevel.official;
 
+  /// This item, vouched for at [trust] instead.
+  StoreItem withTrust(TrustLevel trust) => StoreItem(
+    id: id,
+    name: name,
+    kind: kind,
+    category: category,
+    versions: versions,
+    summary: summary,
+    description: description,
+    tags: tags,
+    author: author,
+    license: license,
+    thumbnail: thumbnail,
+    previews: previews,
+    publisher: publisher,
+    trust: trust,
+    sourceRepo: sourceRepo,
+    discussionUrl: discussionUrl,
+    stats: stats,
+    pricing: pricing,
+    pubPackage: pubPackage,
+    repoId: repoId,
+    unavailable: unavailable,
+  );
+
   /// The versions new installs may pick.
   Iterable<StoreItemVersion> get available =>
       versions.where((v) => v.isAvailable);
@@ -645,7 +692,7 @@ final class StoreCategory {
     }
     return StoreCategory(
       id,
-      json.string('label'),
+      plainText(json, 'label', json.string('label')),
       order: json.optInt('order') ?? 100,
     );
   }
@@ -671,7 +718,7 @@ final class StoreSourceInfo {
   /// Reads one from [json].
   factory StoreSourceInfo.fromJson(JsonFields json) => StoreSourceInfo(
     json.string('id'),
-    json.string('name'),
+    plainText(json, 'name', json.string('name')),
     homepage: json.optString('homepage'),
   );
 
@@ -804,6 +851,18 @@ final class StoreIndex {
     'items': [for (final i in items) i.toJson()],
     'next': next,
   });
+}
+
+/// [url], the picture at [key], once [_checkUrl] allows it.
+String _url(JsonFields json, String key, String url) {
+  _checkUrl(json, key, url);
+  return url;
+}
+
+/// The optional picture at [key], once [_checkUrl] allows it.
+String? _optUrl(JsonFields json, String key) {
+  final url = json.optString(key);
+  return url == null ? null : _url(json, key, url);
 }
 
 void _checkUrl(JsonFields json, String key, String url) {

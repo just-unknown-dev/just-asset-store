@@ -67,10 +67,13 @@ final class Downloader {
   }
 
   /// The picture at [reference] (relative to [source]'s catalog), as a
-  /// cached file; null when it can't be fetched.
+  /// cached file; null when it can't be fetched. Only a catalog in a folder
+  /// on this machine has pictures on disk: never one on the web, and never
+  /// on another machine's share.
   Future<File?> thumbnail(StoreSource source, String reference) async {
     final uri = source.resolve(reference);
     if (uri.scheme == 'file') {
+      if (source.indexUri.scheme != 'file' || uri.host.isNotEmpty) return null;
       final file = File.fromUri(uri);
       return file.existsSync() ? file : null;
     }

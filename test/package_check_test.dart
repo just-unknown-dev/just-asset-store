@@ -5,7 +5,7 @@ import 'dart:typed_data';
 import 'package:just_asset_store/just_asset_store.dart';
 import 'package:test/test.dart';
 
-import 'support/test_catalog.dart';
+import 'support/test_items.dart';
 
 StoreItem catalogItem(TestItem t, {TrustLevel trust = TrustLevel.official}) =>
     StoreItem(
@@ -162,25 +162,96 @@ void main() {
     }
   });
 
-  test('no path or git dependencies', () {
+  test('no path, git or other-server dependencies, however written', () {
+    CheckedPackage withDependencies(
+      TestItem item,
+      String dependencies,
+    ) => check(
+      item,
+      change: (f) => f['pubspec.yaml'] = utf8.encode(
+        'name: ${item.id}\nversion: 1.0.0\ndependencies:\n$dependencies'
+        '${item.kind == ItemKind.content ? 'flutter:\n  assets:\n    - sprites/\n' : ''}',
+      ),
+    );
+    for (final entry in [
+      '  evil:\n    path: ../../evil\n',
+      '  evil:\n    git: https://e.com/e.git\n',
+      // A quoted key is the same key to pub.
+      '  evil: {"git": "https://e.com/e.git"}\n',
+      "  evil:\n    'path': ../../evil\n",
+      // Another package server.
+      '  evil:\n    hosted: https://pub.example.com\n    version: ^1.0.0\n',
+      '  evil:\n    git:\n      url: https://e.com/e.git\n      ref: main\n',
+    ]) {
+      expect(
+        () => withDependencies(kit, entry),
+        refused('by path, git or another package server'),
+        reason: entry,
+      );
+    }
+    // A comment that looks like an SDK dependency is still a comment.
+    expect(
+      () => withDependencies(
+        knight,
+        '  evil: {"git": "https://e.com/e.git"} # sdk: flutter\n',
+      ),
+      refused('A content item depends on nothing'),
+    );
+    // What pub.dev and the SDK give is allowed.
+    expect(
+      withDependencies(
+        kit,
+        '  flutter:\n    sdk: flutter # the SDK\n'
+        '  meta: ^1.0.0\n'
+        '  collection:\n    hosted: https://pub.dev\n    version: ^1.0.0\n',
+      ).manifest.id,
+      'just_kit',
+    );
+    expect(
+      withDependencies(knight, '  flutter: {sdk: flutter}\n').manifest.id,
+      'just_art_knight',
+    );
+  });
+
+  test('build hooks and platform folders, whatever their case', () {
+    for (final path in ['Hook/build.dart', 'HOOK/build.dart', 'Windows/x.cc']) {
+      expect(
+        () => check(kit, change: (f) => f[path] = [1]),
+        refused('which store packages may not have'),
+        reason: path,
+      );
+    }
+  });
+
+  test('every library the manifest registers is in the package', () {
+    expect(
+      () => check(kit, change: (f) => f.remove('lib/editor.dart')),
+      refused('it has no lib/editor.dart'),
+    );
+  });
+
+  test('a pubspec is read in time linear in its length', () {
+    final watch = Stopwatch()..start();
     expect(
       () => check(
         kit,
         change: (f) => f['pubspec.yaml'] = utf8.encode(
-          'name: just_kit\nversion: 1.0.0\ndependencies:\n  evil:\n    path: ../../evil\n',
+          'name: a${' ' * 40000}b\nversion: 1.0.0\n',
         ),
       ),
-      refused('by path or git'),
+      refused('a line longer than 1000 characters'),
     );
     expect(
       () => check(
         kit,
-        change: (f) => f['pubspec.yaml'] = utf8.encode(
-          'name: just_kit\nversion: 1.0.0\ndependencies:\n  evil:\n    git: https://e.com/e.git\n',
+        change: (f) => f['pubspec.yaml'] = List.filled(
+          PackageCheck.maxPubspecBytes + 1,
+          0x20,
         ),
       ),
-      refused('by path or git'),
+      refused('larger than 64 KiB'),
     );
+    expect(watch.elapsed, lessThan(const Duration(seconds: 10)));
   });
 
   test('content files must sit directly in a listed asset folder', () {

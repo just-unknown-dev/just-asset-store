@@ -7,11 +7,10 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:just_core_cli/just_core_cli.dart';
-import 'package:just_core_cli/project.dart'
-    show ProjectLock, ProjectNames, ProjectTransaction;
 
 import '../catalog/item_manifest.dart';
 import '../catalog/store_index.dart';
+import '../install/planner.dart';
 import '../project/store_project.dart';
 import 'store_command.dart';
 
@@ -66,9 +65,28 @@ final class TemplateCommand extends StoreProjectCommand {
         '`${context.invokedAs} store install ${item.id}`.',
       );
     }
+    if (item.unavailable) {
+      throw CommandFailure(
+        '${item.name} is no longer offered: its repository was removed or '
+        'changed hands.',
+      );
+    }
     final version = wanted == null ? item.latest : item.versionOf(wanted);
     if (version == null) {
       throw CommandFailure('No such version of ${item.name}.');
+    }
+    if (!version.isAvailable) {
+      throw CommandFailure(
+        '${item.name} ${version.version} was '
+        '${version.blocked ? 'taken down' : 'withdrawn by its publisher'}.',
+      );
+    }
+    if (item.trust != TrustLevel.official) {
+      output.warn(
+        '${item.name} is code from ${item.author?.name ?? item.publisher} '
+        '(${item.trust.name}). It will run with your permissions in the '
+        'editor and the game: use it only if you trust its publisher.',
+      );
     }
     final source = entry.source;
     if (source == null) {
@@ -76,7 +94,9 @@ final class TemplateCommand extends StoreProjectCommand {
     }
 
     output.info('Downloading ${item.name} ${version.version}…');
-    final bytes = await store.downloader.archive(source, item, version);
+    final bytes = await storeFailures(
+      () => store.downloader.archive(source, item, version),
+    );
     final zip = ZipArchive.read(bytes);
     final manifestEntry = zip.files
         .where((f) => f.path == ItemManifest.fileName)
@@ -106,77 +126,102 @@ final class TemplateCommand extends StoreProjectCommand {
         '${conflicts.length > 8 ? '…' : ''}. Pass --overwrite to replace them.',
       );
     }
+    // What the template's game uses — kits, editor tools, art — planned at
+    // the versions it asks for, with everything else, before anything is
+    // written: then its files and those items go in as one change.
+    final planner = await store.planner(catalog: loaded.catalog);
+    final plan = planner.installAll(manifest.dependencies);
     output.line(
       'Laying ${item.name} ${version.version} over the project: '
       '${files.length} files'
       '${conflicts.isEmpty ? '' : ', ${conflicts.length} replaced'}.',
     );
+    printPlan(plan);
+    output.result = {...planJson(plan), 'template': item.id};
+    if (plan.blockers.isNotEmpty) {
+      throw CommandFailure(
+        '${item.name} needs items that cannot be installed, so nothing was '
+        'changed.',
+      );
+    }
     if (!confirm('Apply?')) return 1;
 
-    final lock = ProjectLock.acquire(project);
-    try {
-      ProjectTransaction.recover(
-        project,
-        trash: StoreProject.trash,
-        trashRoot: StoreProject.trashRoot,
-      );
-      final txn = ProjectTransaction.begin(
-        project,
-        trash: StoreProject.trash,
-        trashRoot: StoreProject.trashRoot,
-      );
-      try {
-        files.forEach(txn.writeBytes);
-        txn.commit();
-      } on Object {
-        txn.rollBack();
-        rethrow;
-      }
-    } finally {
-      lock.release();
-    }
-    await _markExecutable(project, zip);
-
-    // What the template's game uses: kits, editor tools, art.
-    for (final dep in manifest.dependencies.keys) {
-      if (project.readLock().items.containsKey(dep)) continue;
-      output.info('Installing $dep…');
-      final fresh = await loadCatalog(store);
-      final plan = (await store.planner(catalog: fresh.catalog)).install(dep);
-      final code = await applyPlan(store, plan);
-      if (code != 0) {
-        throw CommandFailure('The template needs $dep, which did not install.');
-      }
+    final result = await storeFailures(
+      () => store.installer().apply(
+        plan,
+        files: files,
+        onProgress: (p) => output.info('  $p'),
+      ),
+    );
+    await _markExecutable(project, zip, files.keys.toSet());
+    for (final e in result.setupSnippets.entries) {
+      output.line('\n${e.key} needs this in your game code:\n${e.value}');
     }
     output.result = {
       'template': item.id,
       'version': '${version.version}',
       'files': files.keys.toList(),
       'replaced': conflicts,
-      'installed': manifest.dependencies.keys.toList(),
+      'installed': [
+        for (final c in plan.changes)
+          if (c.kind == ChangeKind.install) c.id,
+      ],
     };
     output.line('Done.');
     return 0;
   }
 
+  /// Folders a template may not write into, anywhere in its tree: git's,
+  /// the tools' scratch folders (journals that crash recovery replays) and
+  /// the trash.
+  static const Set<String> forbiddenFolders = {
+    '.git',
+    '.dart_tool',
+    '.editor_trash',
+    '.just_trash',
+  };
+
+  /// Files at the project's root a template may not write: what the store,
+  /// `just` and pub keep — the lockfile, the project's plugin permissions,
+  /// and pub's own files.
+  static const Set<String> forbiddenFiles = {
+    'just_store.lock.json',
+    'just.json',
+    'pubspec.lock',
+    'pubspec_overrides.yaml',
+    '.packages',
+  };
+
   /// The archive's `template/` files, by project path, with the text ones'
   /// placeholders filled for the project whose pubspec is [pubspec].
   ///
-  /// (Its scripts' executable bits are put back by [_markExecutable].)
+  /// Throws [CommandFailure] when the template would write where the store,
+  /// `just`, pub or git keep their own files. (Its scripts' executable bits
+  /// are put back by [_markExecutable].)
   Map<String, Uint8List> _files(
     ZipArchive zip,
     String pubspec,
     StoreProject project,
   ) {
     final name =
-        RegExp(r'^name:\s*(\S+)', multiLine: true).firstMatch(pubspec)?.group(1) ??
+        RegExp(
+          r'^name:\s*(\S+)',
+          multiLine: true,
+        ).firstMatch(pubspec)?.group(1) ??
         'game';
     final title = project.readProjectFile().title;
     final names = ProjectNames(name, title: title);
     final out = <String, Uint8List>{};
+    final refused = <String>[];
     for (final f in zip.files) {
       if (!f.path.startsWith('template/') || f.path.endsWith('/')) continue;
       final path = f.path.substring('template/'.length);
+      final parts = path.toLowerCase().split('/');
+      if (parts.any(forbiddenFolders.contains) ||
+          (parts.length == 1 && forbiddenFiles.contains(parts.single))) {
+        refused.add(path);
+        continue;
+      }
       final raw = zip.contentOf(f);
       if (!FileHashes.isText(path)) {
         out[path] = raw;
@@ -189,16 +234,29 @@ final class TemplateCommand extends StoreProjectCommand {
           .replaceAll('{{App}}', names.app);
       out[path] = Uint8List.fromList(utf8.encode(text));
     }
+    if (refused.isNotEmpty) {
+      throw CommandFailure(
+        'The template would write where the store, `just`, pub or git keep '
+        'their own files, so nothing was changed: '
+        '${refused.take(8).join(', ')}${refused.length > 8 ? '…' : ''}.',
+      );
+    }
     return out;
   }
 
-  /// Makes the template's files that were executable when it was packed
-  /// (shell scripts, say) executable again. Windows has no such bit.
-  Future<void> _markExecutable(StoreProject project, ZipArchive zip) async {
+  /// Makes the [written] files that were executable when the template was
+  /// packed (shell scripts, say) executable again. Windows has no such bit.
+  Future<void> _markExecutable(
+    StoreProject project,
+    ZipArchive zip,
+    Set<String> written,
+  ) async {
     if (Platform.isWindows) return;
     final paths = [
       for (final f in zip.files)
-        if (f.isExecutable && f.path.startsWith('template/'))
+        if (f.isExecutable &&
+            f.path.startsWith('template/') &&
+            written.contains(f.path.substring('template/'.length)))
           project.file(f.path.substring('template/'.length)).path,
     ];
     if (paths.isEmpty) return;

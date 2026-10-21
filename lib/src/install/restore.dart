@@ -6,6 +6,8 @@ library;
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:just_core_cli/project.dart' show ProjectTransaction;
+
 import '../archive/zip_reader.dart';
 import '../catalog/semver.dart';
 import '../catalog/store_index.dart';
@@ -38,8 +40,9 @@ final class RestoreResult {
 abstract final class StoreRestore {
   /// Downloads each vendored item in [project]'s lockfile whose folder is
   /// gone, from the archive it was installed from, checked against the
-  /// recorded SHA-256; then runs `pub get` and refreshes the registry
-  /// files.
+  /// recorded SHA-256; then — holding the project's lock, all together in
+  /// one change — puts the folders back, and runs `pub get` and refreshes
+  /// the registry files.
   static Future<RestoreResult> run(
     StoreProject project, {
     required PubRunner pub,
@@ -49,7 +52,7 @@ abstract final class StoreRestore {
     CancelToken? cancel,
   }) async {
     final lock = project.readLock();
-    final restored = <String>[];
+    final ready = <String, CheckedPackage>{};
     final problems = <String>[];
     final missing = [
       for (final e in lock.items.entries)
@@ -86,38 +89,60 @@ abstract final class StoreRestore {
           category: item.category ?? '',
           versions: [StoreItemVersion(version: version)],
         );
+        // No catalog here: the lockfile's pin is what it is checked against.
         final checked = PackageCheck.check(
           ZipArchive.read(bytes),
           storeItem,
           storeItem.versions.single,
+          matchDependencies: false,
         );
-        final staging = project.dir('${StoreProject.workDir}/restore/$id');
-        if (staging.existsSync()) staging.deleteSync(recursive: true);
-        checked.files.forEach((path, data) {
-          File('${staging.path}/$path')
-            ..parent.createSync(recursive: true)
-            ..writeAsBytesSync(data);
-        });
-        final target = project.dir(item.path!);
-        target.parent.createSync(recursive: true);
-        retryOnLock(() => staging.renameSync(target.path));
-        restored.add(id);
+        ready[id] = checked;
       } on CancelledException {
         rethrow;
       } on Object catch (e) {
         problems.add('$id: $e');
       }
     }
-    PubResult? result;
-    if (restored.isNotEmpty) {
-      onProgress?.call(const InstallProgress('Resolving packages (pub get)'));
-      result = await pub.get(project.root);
-      if (!result.ok) problems.add('pub get failed:\n${result.summary}');
-      StoreRegistry.write(project);
-    }
-    final leftover = project.dir('${StoreProject.workDir}/restore');
-    if (leftover.existsSync()) leftover.deleteSync(recursive: true);
-    return RestoreResult(restored, problems, pub: result);
+    if (ready.isEmpty) return RestoreResult(const [], problems);
+    cancel?.check();
+    return StoreInstaller.withLock(project, () async {
+      // The lockfile again, now that no change can be running: what changed
+      // since is left as it is.
+      final now = project.readLock();
+      final restored = <String>[];
+      final txn = ProjectTransaction.begin(
+        project,
+        trash: StoreProject.trash,
+        trashRoot: StoreProject.trashRoot,
+      );
+      try {
+        for (final e in ready.entries) {
+          final item = now.items[e.key];
+          final was = lock.items[e.key];
+          if (item == null ||
+              item.path != was?.path ||
+              item.archive?.sha256 != was?.archive?.sha256 ||
+              project.dir(item.path!).existsSync()) {
+            continue;
+          }
+          txn.stage(e.key, e.value.files, executable: e.value.executable);
+          txn.moveIn(e.key, item.path!);
+          restored.add(e.key);
+        }
+        txn.commit();
+      } on Object {
+        txn.rollBack();
+        rethrow;
+      }
+      PubResult? result;
+      if (restored.isNotEmpty) {
+        onProgress?.call(const InstallProgress('Resolving packages (pub get)'));
+        result = await pub.get(project.root);
+        if (!result.ok) problems.add('pub get failed:\n${result.summary}');
+        StoreRegistry.write(project);
+      }
+      return RestoreResult(restored, problems, pub: result);
+    });
   }
 
   static Future<Uint8List> _fetch(
@@ -131,6 +156,14 @@ abstract final class StoreRestore {
     if (cached != null) return cached;
     final Uint8List bytes;
     if (uri.scheme == 'file') {
+      // A folder catalog on this machine; never another machine's share,
+      // which Windows would sign in to with the user's account.
+      if (uri.host.isNotEmpty) {
+        throw DownloadException(
+          'The lockfile names an archive on another machine ($uri), so it '
+          'was not fetched.',
+        );
+      }
       bytes = File.fromUri(uri).readAsBytesSync();
     } else {
       bytes = await HttpStoreSource(

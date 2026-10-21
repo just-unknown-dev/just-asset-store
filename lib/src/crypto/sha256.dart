@@ -1,5 +1,5 @@
-/// Moved to `package:just_core_cli`, which the store now builds on. Re-exported
-/// here so the store's own imports, and the editor's, stay as they were.
+/// SHA-256, which pins every archive, from just_core_cli, which the store
+/// builds on.
 library;
 
-export 'package:just_core_cli/project.dart' show Sha256, isSha256Hex;
+export 'package:just_core_cli/just_core_cli.dart' show Sha256, isSha256Hex;

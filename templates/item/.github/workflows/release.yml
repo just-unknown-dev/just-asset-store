@@ -1,7 +1,8 @@
 # Push a tag like v1.2.0: pack the package into its archive and attach it to
 # a GitHub Release, with the catalog's version file and just_release.json —
 # the file every release carries under the same name, which the store's
-# refresh finds and `just add https://github.com/<owner>/<repo>` reads.
+# refresh finds and `just add https://github.com/<owner>/<repo>` reads. The
+# release notes are the CHANGELOG.md section for that version.
 name: Release
 
 on:
@@ -11,31 +12,55 @@ on:
 permissions:
   contents: write
 
+env:
+  # The store tool, at a version that never moves under this workflow.
+  STORE_VERSION: 0.1.0
+
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dart-lang/setup-dart@v1
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
 
       - name: Install the store tool
-        run: |
-          dart pub global activate just_core_cli
-          dart pub global activate --source git https://github.com/just-unknown-dev/just-asset-store
+        run: dart pub global activate just_asset_store "$STORE_VERSION"
 
+      # The tag reaches the shell as a variable, never as script text.
       - name: The tag matches the version
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          version=$(grep -E '^version:' pubspec.yaml | tr -d '\r' | awk '{print $2}')
-          test "v$version" = "${{ github.ref_name }}" \
-            || { echo "Tag ${{ github.ref_name }} but pubspec says $version"; exit 1; }
+          version=$(grep -E '^version:' pubspec.yaml | head -n 1 | tr -d '\r' \
+            | sed -E "s/^version:[[:space:]]*//; s/[[:space:]]*(#.*)?$//; s/^['\"]//; s/['\"]$//")
+          test "v$version" = "$TAG" \
+            || { echo "Tag $TAG but pubspec says $version"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Pack
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
-          just store pack . -o dist --tag "${{ github.ref_name }}" \
-            --url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
+          dart pub global run just_asset_store:just_plugin store pack . \
+            -o dist --tag "$TAG" \
+            --url "https://github.com/$REPO/releases/download/$TAG"
+
+      - name: Release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '/^## /{p = ($2 == v || $2 == "[" v "]")} p' \
+            CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          test -s "$RUNNER_TEMP/notes.md" \
+            || { echo "CHANGELOG.md has no '## $VERSION' section"; exit 1; }
 
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/* --title "${{ github.ref_name }}" --notes-file CHANGELOG.md
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md"

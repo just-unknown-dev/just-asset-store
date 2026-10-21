@@ -1,5 +1,8 @@
 // `just store` end to end: a creator packs, a catalog builds, a project
 // installs, lists, checks and uninstalls — with real `dart pub get`.
+@TestOn('vm')
+library;
+
 import 'dart:convert';
 import 'dart:io';
 
@@ -56,6 +59,147 @@ void main() {
     expect(code, 1);
     expect(err, contains('No pubspec.yaml'));
   });
+
+  group('in a project', () {
+    test('adding a source keeps the official catalog', () async {
+      final project = tempDir('proj');
+      writeFiles(project, {'pubspec.yaml': pubspecOf('app')});
+      final source = buildCatalog(tempDir('catalog'), [TestItem('k')]);
+      final (code, _, err) = await store([
+        'sources',
+        'add',
+        source.indexUri.toFilePath(),
+        '--project',
+        project.path,
+      ]);
+      expect(code, 0, reason: err);
+      expect(StoreProject(project.path).readLock().sources.map((s) => s.id), [
+        'just',
+        'test',
+      ]);
+    });
+
+    test('relative folders are read from where you are', () async {
+      final here = tempDir('here');
+      writeFiles(here, {
+        'checkout/just_tool/pubspec.yaml': pubspecOf('just_tool'),
+        'checkout/just_tool/just_store.json': jsonEncode({
+          'schema': 1,
+          'id': 'just_tool',
+          'name': 'Tool',
+          'version': '1.0.0',
+          'kind': 'editor-extension',
+          'category': 'editors',
+        }),
+      });
+      final project = tempDir('proj');
+      writeFiles(project, {'pubspec.yaml': pubspecOf('app')});
+      final (code, _, err) = await store([
+        'link',
+        'checkout/just_tool',
+        '--project',
+        project.path,
+      ], cwd: here.path);
+      expect(code, 0, reason: err);
+      final linked = StoreProject(project.path).readLock().items['just_tool']!;
+      expect(
+        Directory(
+          '${project.path}/${linked.path}',
+        ).resolveSymbolicLinksSync().replaceAll(r'\', '/'),
+        Directory(
+          '${here.path}/checkout/just_tool',
+        ).resolveSymbolicLinksSync().replaceAll(r'\', '/'),
+      );
+    });
+
+    test('a project that never used the store passes the check', () async {
+      final project = tempDir('proj');
+      writeFiles(project, {'pubspec.yaml': pubspecOf('app')});
+      final (code, _, err) = await store([
+        'generate',
+        '--check',
+        '--project',
+        project.path,
+      ]);
+      expect(code, 0, reason: err);
+    });
+  });
+
+  group('pack and validate', () {
+    Directory packageFolder({Map<String, List<int>> extra = const {}}) {
+      final pkg = tempDir('pkg');
+      ({
+        ...packageFiles(TestItem('just_art_knight'), '1.0.0'),
+        ...extra,
+      }).forEach((path, bytes) {
+        File('${pkg.path}/$path')
+          ..parent.createSync(recursive: true)
+          ..writeAsBytesSync(bytes);
+      });
+      return pkg;
+    }
+
+    test('list what a refused package must fix, and exit 1', () async {
+      final pkg = packageFolder(
+        extra: {
+          'sprites/run.exe': [0],
+        },
+      );
+      for (final args in [
+        ['pack', pkg.path, '-o', tempDir('out').path],
+        ['validate', pkg.path],
+      ]) {
+        final (code, _, err) = await store(args);
+        expect(code, 1, reason: args.first);
+        expect(err, contains('"sprites/run.exe" is a .exe file'));
+        expect(err, isNot(contains('Unexpected error')));
+      }
+    });
+
+    test('an output folder inside the package is left out of it', () async {
+      final pkg = packageFolder();
+      for (var run = 0; run < 2; run++) {
+        final (code, _, err) = await store([
+          'pack',
+          pkg.path,
+          '-o',
+          '${pkg.path}/dist',
+        ]);
+        expect(code, 0, reason: 'run $run: $err');
+      }
+    });
+
+    test('without --url, the placeholder names the release tag', () async {
+      final out = tempDir('out');
+      final (code, _, err) = await store([
+        'pack',
+        packageFolder().path,
+        '-o',
+        out.path,
+        '--json',
+      ]);
+      expect(code, 0, reason: err);
+      final version =
+          jsonDecode(
+                File(
+                  '${out.path}/just_art_knight-1.0.0.json',
+                ).readAsStringSync(),
+              )
+              as Map;
+      expect(
+        (version['archive'] as Map)['url'],
+        'https://github.com/OWNER/REPO/releases/download/v1.0.0/'
+        'just_art_knight-1.0.0.zip',
+      );
+      final release =
+          jsonDecode(
+                File('${out.path}/${JustRelease.fileName}').readAsStringSync(),
+              )
+              as Map;
+      expect(release['tag'], 'v1.0.0');
+    });
+  });
+
   test(
     'pack, index build, install, list, generate --check, uninstall',
     () async {
@@ -133,8 +277,13 @@ void main() {
       expect(out, contains('would install'));
 
       // A project installs it.
+      // A game project, which has its generated files (empty) already.
       final project = tempDir('proj');
-      writeFiles(project, {'pubspec.yaml': pubspecOf('app')});
+      writeFiles(project, {
+        'pubspec.yaml': pubspecOf('app'),
+        StoreProject.modulesFile: StoreCodegen.modules(const []),
+        StoreProject.extensionsFile: StoreCodegen.extensions(const []),
+      });
       final common = [
         '--project',
         project.path,
@@ -245,7 +394,20 @@ void main() {
       }),
     });
     var (code, out, _) = await store(['index', 'codeowners', repo.path]);
-    expect(out, contains('/publishers/just.json @me @boss'));
+    expect(out, contains('/publishers/ @boss'));
+    // Written as UTF-8 by the tool itself, whatever the shell would do.
+    final owners = '${repo.path}/.github/CODEOWNERS';
+    (code, out, _) = await store([
+      'index',
+      'codeowners',
+      repo.path,
+      '--file',
+      owners,
+    ]);
+    expect(code, 0);
+    expect(File(owners).readAsStringSync(), contains('/publishers/ @boss'));
+    (code, _, _) = await store(['index', 'check', repo.path, '--only', 'x']);
+    expect(code, 2, reason: '--only goes with --download');
     (code, out, _) = await store(['index', 'check', repo.path]);
     expect(code, 0);
     expect(out, contains('0 items build'));

@@ -200,7 +200,13 @@ void main() {
       // A kind this version doesn't know is a newer catalog's: left out,
       // not a reason to refuse the rest.
       expect(
-        read(index(items: [knight(extra: {'kind': 'plugin'})])).skipped,
+        read(
+          index(
+            items: [
+              knight(extra: {'kind': 'plugin'}),
+            ],
+          ),
+        ).skipped,
         ['just_art_knight'],
       );
       expect(
@@ -437,6 +443,11 @@ void main() {
         'package:just_platformer_kit/editor.txt',
         'dart:io',
         'file:///c:/evil.dart',
+        // Nothing that ends the import's string or starts a directive.
+        "package:just_platformer_kit/a.dart' if (dart.library.io) 'b.dart",
+        "package:just_platformer_kit/a.dart'; import 'b.dart",
+        'package:just_platformer_kit/a b.dart',
+        r'package:just_platformer_kit/$a.dart',
       ]) {
         final json = kit();
         ((json['runtime'] as Map)['extensions'] as List)[0] = {
@@ -503,6 +514,75 @@ void main() {
       expect(StoreNames.isDottedIdentifier(r'_Private$1'), isTrue);
       expect(StoreNames.isDottedIdentifier('a.'), isFalse);
       expect(StoreNames.isDottedIdentifier('a.new'), isFalse);
+    });
+  });
+
+  group('what a catalog may not slip in', () {
+    test('control characters in what is shown', () {
+      for (final extra in <Map<String, Object?>>[
+        {'name': 'Knight\u001b[2K'},
+        {'summary': 'ok\u009b31m'},
+        {
+          'tags': ['hero\u202e'],
+        },
+        {
+          'author': {'name': 'Ju\u0007st'},
+        },
+        {'description': 'clear\u001b[H'},
+      ]) {
+        expect(
+          () => read(index(items: [knight(extra: extra)])),
+          throwsA(isA<StoreFormatException>()),
+          reason: '$extra',
+        );
+      }
+      expect(
+        () => ItemManifest.parse(
+          jsonEncode({
+            'schema': 1,
+            'id': 'just_kit',
+            'name': 'Kit\u001b]0;pwned\u0007',
+            'version': '1.0.0',
+            'kind': 'kit',
+            'category': 'kits',
+          }),
+        ),
+        throwsA(isA<StoreFormatException>()),
+      );
+      // Line breaks and tabs are text, where text has lines.
+      final ok = read(
+        index(
+          items: [
+            knight(extra: {'description': 'Two\nlines\tand a tab.'}),
+          ],
+        ),
+      );
+      expect(ok.items.single.description, 'Two\nlines\tand a tab.');
+    });
+
+    test('pictures on the web or beside the catalog, not files elsewhere', () {
+      for (final extra in <Map<String, Object?>>[
+        {'thumbnail': 'file:///C:/Windows/win.ini'},
+        {'thumbnail': '//attacker.example/share/x.png'},
+        {'thumbnail': '../../x.png'},
+        {
+          'previews': ['file://attacker.example/s/x.png'],
+        },
+      ]) {
+        expect(
+          () => read(index(items: [knight(extra: extra)])),
+          throwsA(isA<StoreFormatException>()),
+          reason: '$extra',
+        );
+      }
+    });
+
+    test("a runtime library's package is the one its id names", () {
+      final lib = tiledLib()..['pub'] = {'package': 'forge2d'};
+      expect(
+        () => read(index(items: [knight(), spriteEditor(), lib])),
+        throwsA(isA<StoreFormatException>()),
+      );
     });
   });
 

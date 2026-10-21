@@ -11,6 +11,7 @@ import '../catalog/item_manifest.dart';
 import '../catalog/json.dart';
 import '../catalog/store_index.dart';
 import '../install/package_check.dart';
+import '../project/store_project.dart';
 import '../sources/downloader.dart';
 import '../sources/store_source.dart';
 import '../tools/catalog_builder.dart';
@@ -38,6 +39,7 @@ final class PackCommand extends JustCommand {
       )
       ..addOption(
         'tag',
+        valueHelp: 'tag',
         help:
             'The GitHub release tag the archive goes to (default: '
             'v<version>), named in just_release.json.',
@@ -60,16 +62,23 @@ final class PackCommand extends JustCommand {
     final folder = Directory(
       absoluteIn(singleArgument('a folder'), context.workingDirectory),
     );
-    final result = Packer.pack(folder);
     final outDir = Directory(
       absoluteIn(argResults!.option('out')!, context.workingDirectory),
-    )..createSync(recursive: true);
+    );
+    // An output folder inside the package (`-o dist`) holds earlier
+    // archives: never packed into the next one.
+    final result = _pack(
+      folder,
+      excluding: StoreProject(folder.path).relativeOf(outDir.absolute.path),
+    );
+    outDir.createSync(recursive: true);
     final zip = File('${outDir.path}/${result.fileName}')
       ..writeAsBytesSync(result.bytes);
+    final tag = argResults!.option('tag') ?? 'v${result.manifest.version}';
     final base = argResults!.option('url');
     final url = base == null
-        ? 'https://github.com/OWNER/REPO/releases/download/'
-              '${result.manifest.id}-v${result.manifest.version}/${result.fileName}'
+        ? 'https://github.com/OWNER/REPO/releases/download/$tag/'
+              '${result.fileName}'
         : '${base.endsWith('/') ? base : '$base/'}${result.fileName}';
     final versionFile =
         File(
@@ -79,13 +88,15 @@ final class PackCommand extends JustCommand {
         );
     // The release's own description, under a name every release shares:
     // what `just add https://github.com/<owner>/<repo>` reads.
-    final tag = argResults!.option('tag') ?? 'v${result.manifest.version}';
     final releaseFile = File('${outDir.path}/${JustRelease.fileName}')
       ..writeAsStringSync(
         JustRelease(
           tag: tag,
           manifest: result.manifest,
-          version: result.versionJson(result.fileName, published: DateTime.now()),
+          version: result.versionJson(
+            result.fileName,
+            published: DateTime.now(),
+          ),
         ).toText(),
       );
     output
@@ -138,7 +149,7 @@ final class ValidateCommand extends JustCommand {
       context.workingDirectory,
     );
     if (Directory(path).existsSync()) {
-      final r = Packer.pack(Directory(path));
+      final r = _pack(Directory(path));
       for (final w in r.warnings) {
         output.warn(w);
       }
@@ -177,7 +188,12 @@ final class ValidateCommand extends JustCommand {
       name: manifest.name,
       kind: manifest.kind,
       category: manifest.category,
-      versions: [StoreItemVersion(version: manifest.version)],
+      versions: [
+        StoreItemVersion(
+          version: manifest.version,
+          dependencies: manifest.dependencies,
+        ),
+      ],
     );
     final CheckedPackage checked;
     try {
@@ -196,6 +212,16 @@ final class ValidateCommand extends JustCommand {
       }
       ..line('${manifest.name} ${manifest.version} would install.');
     return 0;
+  }
+}
+
+/// [Packer.pack], with a package it refuses as the command's failure: the
+/// problems listed, not an unexpected error.
+PackResult _pack(Directory folder, {String? excluding}) {
+  try {
+    return Packer.pack(folder, excluding: excluding);
+  } on PackageCheckException catch (e) {
+    throw CommandFailure('$e');
   }
 }
 
@@ -220,6 +246,13 @@ final class IndexCommand extends JustCommand {
         'only',
         valueHelp: 'id',
         help: 'With --download: only this item.',
+      )
+      ..addOption(
+        'file',
+        valueHelp: 'path',
+        help:
+            '`codeowners` writes it to this file, as UTF-8, instead of '
+            'printing it (a redirect in Windows PowerShell writes UTF-16).',
       );
   }
 
@@ -246,7 +279,15 @@ final class IndexCommand extends JustCommand {
         case 'codeowners':
           final text = CatalogBuilder.codeowners(repo);
           output.result = {'codeowners': text};
-          if (!output.json) context.out.write(text);
+          final file = argResults!.option('file');
+          if (file != null) {
+            final target = File(absoluteIn(file, context.workingDirectory));
+            target.parent.createSync(recursive: true);
+            target.writeAsStringSync(text);
+            output.line('Wrote ${target.path}.');
+          } else if (!output.json) {
+            context.out.write(text);
+          }
           return 0;
         case 'build':
           final build = CatalogBuilder.build(repo);
@@ -281,12 +322,18 @@ final class IndexCommand extends JustCommand {
   }
 
   Future<int> _check(Directory repo) async {
+    final only = argResults!.option('only');
+    if (only != null && !argResults!.flag('download')) {
+      throw const UsageFailure('--only goes with --download.');
+    }
     final build = CatalogBuilder.build(repo);
     output.line('${build.index.items.length} items build.');
     final results = <Map<String, Object?>>[];
     output.result = {'items': build.index.items.length, 'checked': results};
     if (!argResults!.flag('download')) return 0;
-    final only = argResults!.option('only');
+    if (only != null && build.index.item(only) == null) {
+      throw CommandFailure('No item "$only" in the catalog.');
+    }
     final source = FolderStoreSource(repo.path);
     final downloader = Downloader();
     var failed = 0;

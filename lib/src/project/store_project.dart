@@ -35,10 +35,6 @@ final class StoreProject extends JustProject {
   /// at a time whoever makes it.
   static const String workDir = JustProject.workDir;
 
-  /// Where the store kept its journals before it built on just_core_cli; a crash
-  /// from then is still recovered.
-  static const String legacyJournals = '.dart_tool/just_asset_store/txn';
-
   /// The folder installed items go into.
   static const String packagesDir = JustProject.packagesDir;
 

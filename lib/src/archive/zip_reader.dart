@@ -1,10 +1,6 @@
-/// Moved to `package:just_core_cli`, which the store now builds on. Re-exported
-/// here so the store's own imports, and the editor's, stay as they were.
+/// Reading untrusted ZIP archives in memory, from just_core_cli, which the
+/// store builds on.
 library;
 
-export 'package:just_core_cli/fetch.dart'
-    show
-        ZipFormatException,
-        ZipLimits,
-        ZipEntry,
-        ZipArchive;
+export 'package:just_core_cli/just_core_cli.dart'
+    show ZipFormatException, ZipLimits, ZipEntry, ZipArchive;

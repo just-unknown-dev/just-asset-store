@@ -1,5 +1,8 @@
 // The creator and catalog tools — the packer and the catalog builder — and
 // restoring a project from its lockfile.
+@TestOn('vm')
+library;
+
 import 'dart:convert';
 import 'dart:io';
 
@@ -276,10 +279,10 @@ void main() {
         text,
         contains('/items/just_art_knight/ @ju-skb @just-maintainer\n'),
       );
-      expect(
-        text,
-        contains('/publishers/pixel_folk.json @pixelfolk @just-maintainer\n'),
-      );
+      // A publisher's file says how far the store vouches for it: only the
+      // maintainers approve changes to it, never the publisher.
+      expect(text, contains('/publishers/ @just-maintainer\n'));
+      expect(text, isNot(contains('/publishers/pixel_folk.json')));
     });
   });
 
@@ -298,7 +301,8 @@ void main() {
       );
       final plan = (await store.planner()).install('just_art_knight');
       await store.installer().apply(plan);
-      expect(project.readLock().sources.single.id, 'test');
+      // The project read the official catalog before: it still does.
+      expect(project.readLock().sources.map((s) => s.id), ['just', 'test']);
       final before = snapshot(dir);
 
       project
