@@ -33,9 +33,23 @@ enum ItemKind {
   /// Whether items of this kind hold Dart code.
   bool get isCode => this != content;
 
-  /// Whether its source is copied into `packages/{category}/{name}/`
-  /// (everything but pub.dev libraries and templates).
+  /// Whether items of this kind are plugins: code that comes only through
+  /// the store, published on GitHub and never on pub.dev — editor
+  /// extensions and kits.
+  bool get isPlugin => this == editorExtension || this == kit;
+
+  /// Whether its source is copied into the project (everything but pub.dev
+  /// libraries and templates), into [installFolder].
   bool get isVendored => this != runtimeLibrary && this != template;
+
+  /// The project folder an item of this kind is copied into, as
+  /// `{installFolder}/{category}/{name}/`: `plugins` for a plugin,
+  /// `packages` for content. Null when it isn't copied in ([isVendored]).
+  String? get installFolder => switch (this) {
+    content => 'packages',
+    editorExtension || kit => 'plugins',
+    runtimeLibrary || template => null,
+  };
 
   /// Whether installing one means restarting the editor: code can't be
   /// loaded into a running app.
@@ -60,6 +74,91 @@ enum TrustLevel {
   static final Map<String, TrustLevel> byId = {
     for (final t in values) t.name: t,
   };
+}
+
+/// Something an item's code does that a user should know before installing
+/// it. Dart code in the editor can't be fenced in, so these are declared,
+/// shown before installing, and never hidden; native code that isn't
+/// declared is refused.
+enum ItemPermission {
+  /// It connects to the internet.
+  network('network', 'Connects to the internet'),
+
+  /// It reads or writes files outside the project.
+  files('files', 'Reads or writes files outside the project'),
+
+  /// It starts other programs.
+  processes('processes', 'Runs other programs'),
+
+  /// It brings native code: Flutter plugins.
+  native('native', 'Brings native code (Flutter plugins)');
+
+  const ItemPermission(this.id, this.label);
+
+  /// The name used in JSON.
+  final String id;
+
+  /// What it means, for the install preview.
+  final String label;
+
+  /// The permissions, keyed by their JSON names.
+  static final Map<String, ItemPermission> byId = {
+    for (final p in values) p.id: p,
+  };
+
+  /// [permissions] as one phrase, in their usual order: "connects to the
+  /// internet and runs other programs".
+  static String describe(Iterable<ItemPermission> permissions) {
+    final parts = [
+      for (final p in values)
+        if (permissions.contains(p))
+          p.label[0].toLowerCase() + p.label.substring(1),
+    ];
+    if (parts.length < 2) return parts.join();
+    return '${parts.sublist(0, parts.length - 1).join(', ')} and '
+        '${parts.last}';
+  }
+}
+
+/// How finished a version of an item is, as its own `just_store.json`
+/// says. Every plugin (editor tool or kit) names one.
+enum ItemStage {
+  /// Ready for real projects.
+  stable('stable', 'Stable'),
+
+  /// Complete enough to use; may still change.
+  beta('beta', 'Beta'),
+
+  /// A first try: it may change or break between versions. Listed only to
+  /// those who ask, and installing it asks first.
+  experimental('experimental', 'Experimental'),
+
+  /// No longer developed: listed only to a search, installing it asks
+  /// first, and projects that have it are told what replaces it.
+  deprecated('deprecated', 'Deprecated');
+
+  const ItemStage(this.id, this.label);
+
+  /// The name used in JSON.
+  final String id;
+
+  /// What it is called on a badge.
+  final String label;
+
+  /// Whether a store lists it only when asked: experimental and deprecated
+  /// items.
+  bool get hiddenByDefault => this == experimental || this == deprecated;
+
+  /// The stages, keyed by their JSON names.
+  static final Map<String, ItemStage> byId = {for (final s in values) s.id: s};
+
+  /// The stage named at [key] in [json], or null when there is none.
+  static ItemStage? optFrom(JsonFields json, String key) {
+    final id = json.optString(key);
+    if (id == null) return null;
+    return byId[id] ??
+        (throw json.error(key, 'Expected one of: ${byId.keys.join(', ')}.'));
+  }
 }
 
 /// Who can download a version.
@@ -98,13 +197,13 @@ final class StoreLicense {
 
   /// Reads one from [json].
   factory StoreLicense.fromJson(JsonFields json) => StoreLicense(
-    json.string('spdx'),
+    plainText(json, 'spdx', json.string('spdx')),
     attribution: optPlainText(
       json,
       'attribution',
       json.optString('attribution'),
     ),
-    file: json.optString('file'),
+    file: optPlainText(json, 'file', json.optString('file')),
   );
 
   /// The SPDX licence id, or `LicenseRef-…` for a custom one.
@@ -129,7 +228,7 @@ final class StoreAuthor {
   /// Reads one from [json].
   factory StoreAuthor.fromJson(JsonFields json) => StoreAuthor(
     plainText(json, 'name', json.string('name')),
-    url: json.optString('url'),
+    url: optPlainText(json, 'url', json.optString('url')),
   );
 
   /// Their name.
@@ -231,6 +330,9 @@ final class StoreArchive {
     this.files,
   });
 
+  /// The largest archive the store downloads: 512 MiB.
+  static const int maxSize = 512 << 20;
+
   /// Reads one from [json].
   factory StoreArchive.fromJson(JsonFields json) {
     final sha = json.string('sha256');
@@ -292,6 +394,9 @@ final class StoreItemVersion {
     this.dependencies = const {},
     this.pubDependencies = const {},
     this.nativePlugins = const [],
+    this.permissions = const {},
+    this.stage,
+    this.replacedBy,
   });
 
   /// Reads one from [json], for an item of [kind].
@@ -319,11 +424,27 @@ final class StoreItemVersion {
           ? null
           : VersionConstraint.tryParse(constraintText) ??
                 (throw json.error('constraint', 'Not a version constraint.')),
-      requires: json.constraints('requires'),
+      requires: _packages(json, 'requires', json.constraints('requires')),
       dependencies: json.constraints('dependencies'),
-      pubDependencies: json.constraints('pubDependencies'),
-      nativePlugins: json.strings('nativePlugins'),
+      pubDependencies: _packages(
+        json,
+        'pubDependencies',
+        json.constraints('pubDependencies'),
+      ),
+      nativePlugins: [
+        for (final p in json.strings('nativePlugins'))
+          _packageName(json, 'nativePlugins', p),
+      ],
+      permissions: _permissions(json),
+      stage: ItemStage.optFrom(json, 'stage'),
+      replacedBy: switch (json.optString('replacedBy')) {
+        final id? => _packageName(json, 'replacedBy', id),
+        null => null,
+      },
     );
+    if (kind == ItemKind.content && v.permissions.isNotEmpty) {
+      throw json.error('permissions', 'A content item holds no code.');
+    }
     if (kind.isVendored) {
       if (access == AccessLevel.public && v.archive == null) {
         throw json.error('archive', 'A public version needs an archive.');
@@ -388,6 +509,16 @@ final class StoreItemVersion {
   /// every build of the game, even when only the editor uses them.
   final List<String> nativePlugins;
 
+  /// What its code does that a user should know before installing it, as
+  /// its manifest declares: shown before every install.
+  final Set<ItemPermission> permissions;
+
+  /// How finished it is, as its manifest says; every plugin names one.
+  final ItemStage? stage;
+
+  /// For a [ItemStage.deprecated] version: the item that replaces it.
+  final String? replacedBy;
+
   /// Whether new installs may pick it.
   bool get isAvailable => !yanked && !blocked;
 
@@ -408,6 +539,12 @@ final class StoreItemVersion {
       for (final e in pubDependencies.entries) e.key: '${e.value}',
     },
     'nativePlugins': nativePlugins,
+    'permissions': [
+      for (final p in ItemPermission.values)
+        if (permissions.contains(p)) p.id,
+    ],
+    'stage': stage?.id,
+    'replacedBy': replacedBy,
   });
 }
 
@@ -428,7 +565,7 @@ final class StoreItem {
     this.thumbnail,
     this.previews = const [],
     this.publisher = 'just',
-    this.trust = TrustLevel.official,
+    this.trust = TrustLevel.community,
     this.sourceRepo,
     this.discussionUrl,
     this.stats,
@@ -495,14 +632,20 @@ final class StoreItem {
       previews: [
         for (final p in json.strings('previews')) _url(json, 'previews', p),
       ],
-      publisher: json.optString('publisher') ?? 'just',
+      publisher:
+          optPlainText(json, 'publisher', json.optString('publisher')) ??
+          'just',
       trust: json.choice(
         'trust',
         TrustLevel.byId,
-        fallback: TrustLevel.official,
+        fallback: TrustLevel.community,
       ),
-      sourceRepo: json.optString('sourceRepo'),
-      discussionUrl: json.optString('discussionUrl'),
+      sourceRepo: optPlainText(json, 'sourceRepo', json.optString('sourceRepo')),
+      discussionUrl: optPlainText(
+        json,
+        'discussionUrl',
+        json.optString('discussionUrl'),
+      ),
       stats: stats == null ? null : StoreStats.fromJson(stats),
       pricing: pricing == null
           ? StorePricing.free
@@ -524,7 +667,8 @@ final class StoreItem {
   final ItemKind kind;
 
   /// The store category it is shown under, and the folder it installs
-  /// into: `packages/{category}/{id}/`.
+  /// into: `packages/{category}/{id}/` for content,
+  /// `plugins/{category}/{id}/` for an editor extension or a kit.
   final String category;
 
   /// One line for its card.
@@ -583,6 +727,13 @@ final class StoreItem {
 
   /// Whether it is made by the store's own team.
   bool get isOfficial => trust == TrustLevel.official;
+
+  /// How finished it is: its [latest] version's stage.
+  ItemStage? get stage => latest?.stage;
+
+  /// What replaces it, when its [latest] version is deprecated.
+  String? get replacedBy =>
+      stage == ItemStage.deprecated ? latest?.replacedBy : null;
 
   /// This item, vouched for at [trust] instead.
   StoreItem withTrust(TrustLevel trust) => StoreItem(
@@ -667,7 +818,7 @@ final class StoreItem {
     'thumbnail': thumbnail,
     'previews': previews,
     'publisher': publisher == 'just' ? null : publisher,
-    'trust': trust == TrustLevel.official ? null : trust.name,
+    'trust': trust == TrustLevel.community ? null : trust.name,
     'sourceRepo': sourceRepo,
     'discussionUrl': discussionUrl,
     'stats': stats?.toJson(),
@@ -716,11 +867,22 @@ final class StoreSourceInfo {
   const StoreSourceInfo(this.id, this.name, {this.homepage});
 
   /// Reads one from [json].
-  factory StoreSourceInfo.fromJson(JsonFields json) => StoreSourceInfo(
-    json.string('id'),
-    plainText(json, 'name', json.string('name')),
-    homepage: json.optString('homepage'),
-  );
+  factory StoreSourceInfo.fromJson(JsonFields json) {
+    final id = json.string('id');
+    if (!_sourceId.hasMatch(id)) {
+      throw json.error(
+        'id',
+        'A source id is lowercase letters, digits, ".", "_" and "-".',
+      );
+    }
+    return StoreSourceInfo(
+      id,
+      plainText(json, 'name', json.string('name')),
+      homepage: optPlainText(json, 'homepage', json.optString('homepage')),
+    );
+  }
+
+  static final RegExp _sourceId = RegExp(r'^[a-z0-9][a-z0-9._-]{0,63}$');
 
   /// Its id, recorded in the lockfile beside what came from it.
   final String id;
@@ -736,49 +898,71 @@ final class StoreSourceInfo {
       compactJson({'id': id, 'name': name, 'homepage': homepage});
 }
 
-/// A catalog: the `index.json` a store source serves.
+/// An item the store took down — malware, a stolen asset — and why. It is
+/// no longer offered, and projects that installed it are warned.
+final class RemovedItem {
+  /// [id] was removed for [reason].
+  const RemovedItem(this.id, this.reason);
+
+  /// Reads one from [json].
+  factory RemovedItem.fromJson(JsonFields json) {
+    final id = json.string('id');
+    final problem = StoreNames.idProblem(id);
+    if (problem != null) throw json.error('id', problem);
+    return RemovedItem(id, plainText(json, 'reason', json.string('reason')));
+  }
+
+  /// The item's id.
+  final String id;
+
+  /// Why, in a sentence.
+  final String reason;
+
+  /// This removal as JSON.
+  Map<String, Object?> toJson() => {'id': id, 'reason': reason};
+}
+
+/// A catalog: what a store source offers. It is published as a small
+/// `index.json` naming pieces (see `CatalogFiles`), or — small catalogs,
+/// tests — as one `index.json` listing every item, which [fromJson] reads.
 final class StoreIndex {
-  /// A catalog from [source] listing [items] under [categories].
+  /// A catalog from [source] listing [items] under [categories]. Use
+  /// [StoreIndex.checked] for items not yet checked against each other.
   StoreIndex({
     required this.source,
     required this.categories,
     required this.items,
     this.generatedAt,
-    this.next,
+    this.removed = const [],
     this.skipped = const [],
+    this.featured = const [],
   }) : _byId = {for (final i in items) i.id: i};
 
-  /// The ids of the items left out because this version doesn't know their
-  /// kind: an older store reading a newer catalog.
-  final List<String> skipped;
+  /// A catalog of [items], once no id is listed twice and every item's
+  /// category is one of [categories] (which come out sorted). Throws
+  /// [StoreFormatException] naming the item as `items[N]`.
+  factory StoreIndex.checked({
+    required StoreSourceInfo source,
+    required List<StoreCategory> categories,
+    required List<StoreItem> items,
+    DateTime? generatedAt,
+    List<RemovedItem> removed = const [],
+    List<String> skipped = const [],
+    List<String> featured = const [],
+  }) {
+    _check(items, categories);
+    return StoreIndex(
+      source: source,
+      categories: [...categories]..sort((a, b) => a.order.compareTo(b.order)),
+      items: items,
+      generatedAt: generatedAt,
+      removed: removed,
+      skipped: skipped,
+      featured: featured,
+    );
+  }
 
-  /// The newest catalog format this code reads.
-  static const int currentSchema = 1;
-
-  /// Reads a catalog from [json]. Throws [StoreFormatException].
-  factory StoreIndex.fromJson(JsonFields json) {
-    final schema = json.integer('schema', min: 1);
-    if (schema > currentSchema) {
-      throw json.error(
-        'schema',
-        'This catalog needs a newer Asset Store (format $schema; this one '
-            'reads up to $currentSchema).',
-      );
-    }
-    final categories = [
-      for (final c in json.objects('categories')) StoreCategory.fromJson(c),
-    ];
-    // An item of a kind this version doesn't know (a newer catalog's) is
-    // left out, not a reason to refuse the whole catalog.
-    final skipped = <String>[];
-    final items = [
-      for (final i in json.objects('items'))
-        if (i.raw('kind') case final String k
-            when k.isNotEmpty && !ItemKind.byId.containsKey(k))
-          ?_skip(i, skipped)
-        else
-          StoreItem.fromJson(i),
-    ];
+  static void _check(List<StoreItem> items, List<StoreCategory> categories) {
     final ids = <String>{};
     final known = {for (final c in categories) c.id};
     for (var i = 0; i < items.length; i++) {
@@ -795,22 +979,84 @@ final class StoreIndex {
         );
       }
     }
+  }
+
+  /// The ids of the items left out because this version doesn't know their
+  /// kind: an older store reading a newer catalog.
+  final List<String> skipped;
+
+  /// The newest catalog format this code reads.
+  static const int currentSchema = 2;
+
+  /// Reads a catalog that lists its items itself. Throws
+  /// [StoreFormatException], also for a catalog split into pieces, which
+  /// only a store source can read.
+  factory StoreIndex.fromJson(JsonFields json) {
+    final schema = json.integer('schema', min: 1);
+    if (schema > currentSchema) {
+      throw json.error(
+        'schema',
+        'This catalog needs a newer Asset Store (format $schema; this one '
+            'reads up to $currentSchema).',
+      );
+    }
+    if (json.has('pieces')) {
+      throw json.error(
+        'pieces',
+        'This catalog is split into pieces; read it through its source.',
+      );
+    }
+    final categories = categoriesFrom(json);
+    final skipped = <String>[];
+    final items = itemsFrom(json, skipped);
+    _check(items, categories);
     return StoreIndex(
       source: StoreSourceInfo.fromJson(json.object('source')),
       categories: categories..sort((a, b) => a.order.compareTo(b.order)),
       items: items,
       generatedAt: json.optTime('generatedAt'),
-      next: json.optString('next'),
+      removed: removedFrom(json),
       skipped: skipped,
+      featured: featuredFrom(json),
     );
   }
+
+  /// The ids listed at `featured` in [json]: any that is not an id is left
+  /// out (it names nothing).
+  static List<String> featuredFrom(JsonFields json) => [
+    for (final id in json.strings('featured'))
+      if (StoreNames.isId(id)) id,
+  ];
+
+  /// The categories listed at `categories` in [json].
+  static List<StoreCategory> categoriesFrom(JsonFields json) => [
+    for (final c in json.objects('categories')) StoreCategory.fromJson(c),
+  ];
+
+  /// The removals listed at `removed` in [json].
+  static List<RemovedItem> removedFrom(JsonFields json) => [
+    for (final r in json.objects('removed')) RemovedItem.fromJson(r),
+  ];
+
+  /// The items listed at `items` in [json]. An item of a kind this version
+  /// doesn't know (a newer catalog's) is left out, its id added to
+  /// [skipped] — not a reason to refuse the whole catalog.
+  static List<StoreItem> itemsFrom(JsonFields json, List<String> skipped) => [
+    for (final i in json.objects('items'))
+      if (i.raw('kind') case final String k
+          when k.isNotEmpty && !ItemKind.byId.containsKey(k))
+        ?_skip(i, skipped)
+      else
+        StoreItem.fromJson(i),
+  ];
 
   static StoreItem? _skip(JsonFields item, List<String> skipped) {
     skipped.add('${item.raw('id')}');
     return null;
   }
 
-  /// [text] parsed as a catalog. Throws [StoreFormatException].
+  /// [text] parsed as a catalog that lists its items itself. Throws
+  /// [StoreFormatException].
   factory StoreIndex.parse(String text) =>
       StoreIndex.fromJson(JsonFields.parse(text));
 
@@ -826,13 +1072,30 @@ final class StoreIndex {
   /// When it was built.
   final DateTime? generatedAt;
 
-  /// The next page of items, for catalogs split into pages.
-  final String? next;
+  /// What the store took down.
+  final List<RemovedItem> removed;
+
+  /// The ids of the items its makers show first, in order: the website's
+  /// featured shelf. An id it doesn't list names nothing.
+  final List<String> featured;
+
+  /// The [featured] items it lists, in order.
+  List<StoreItem> get featuredItems => [
+    for (final id in featured) ?_byId[id],
+  ];
 
   final Map<String, StoreItem> _byId;
 
   /// The item with [id], or null.
   StoreItem? item(String id) => _byId[id];
+
+  /// Why the item [id] was taken down, when it was.
+  RemovedItem? removal(String id) {
+    for (final r in removed) {
+      if (r.id == id) return r;
+    }
+    return null;
+  }
 
   /// The category with [id], or null.
   StoreCategory? category(String id) {
@@ -842,20 +1105,54 @@ final class StoreIndex {
     return null;
   }
 
-  /// This catalog as JSON.
+  /// This catalog as one JSON object listing every item.
   Map<String, Object?> toJson() => compactJson({
     'schema': currentSchema,
     'source': source.toJson(),
     'generatedAt': generatedAt?.toUtc().toIso8601String(),
     'categories': [for (final c in categories) c.toJson()],
     'items': [for (final i in items) i.toJson()],
-    'next': next,
+    'removed': [for (final r in removed) r.toJson()],
+    'featured': featured.isEmpty ? null : featured,
   });
+}
+
+final RegExp _packageNamePattern = RegExp(r'^[a-z_][a-z0-9_]{0,63}$');
+
+/// The `permissions` at [json], each one the store knows.
+Set<ItemPermission> _permissions(JsonFields json) => {
+  for (final name in json.strings('permissions'))
+    ItemPermission.byId[name] ??
+        (throw json.error(
+          'permissions',
+          'Expected one of: ${ItemPermission.byId.keys.join(', ')}.',
+        )),
+};
+
+/// [name] at [key], once it is a package name: what pub would fetch, and
+/// what the store prints.
+String _packageName(JsonFields json, String key, String name) {
+  if (!_packageNamePattern.hasMatch(name)) {
+    throw json.error(key, '"$name" is not a package name.');
+  }
+  return name;
+}
+
+/// [map], whose keys at [key] must be package names.
+Map<String, VersionConstraint> _packages(
+  JsonFields json,
+  String key,
+  Map<String, VersionConstraint> map,
+) {
+  for (final name in map.keys) {
+    _packageName(json, key, name);
+  }
+  return map;
 }
 
 /// [url], the picture at [key], once [_checkUrl] allows it.
 String _url(JsonFields json, String key, String url) {
-  _checkUrl(json, key, url);
+  _checkUrl(json, key, url, picture: true);
   return url;
 }
 
@@ -865,14 +1162,26 @@ String? _optUrl(JsonFields json, String key) {
   return url == null ? null : _url(json, key, url);
 }
 
-void _checkUrl(JsonFields json, String key, String url) {
+/// Refuses [url] at [key] unless it is an `https:` address — `http:` too
+/// for an archive, which only a catalog on this machine may use — or a path
+/// beside `index.json`. A [picture] is fetched as soon as a card shows it,
+/// so it gets `https:` only.
+void _checkUrl(
+  JsonFields json,
+  String key,
+  String url, {
+  bool picture = false,
+}) {
   final uri = Uri.tryParse(url);
   if (uri == null) throw json.error(key, '"$url" is not a URL.');
   if (uri.hasScheme) {
-    if (uri.scheme != 'https' && uri.scheme != 'http') {
-      throw json.error(key, 'Only http and https URLs are allowed.');
-    }
-    return;
+    if (uri.scheme == 'https' || (!picture && uri.scheme == 'http')) return;
+    throw json.error(
+      key,
+      picture
+          ? 'Pictures must be https URLs, or files beside index.json.'
+          : 'Only http and https URLs are allowed.',
+    );
   }
   // A path relative to index.json: no climbing out, no absolute paths.
   if (url.startsWith('/') ||

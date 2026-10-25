@@ -143,4 +143,93 @@ void main() {
       '../just_sprite_editor',
     );
   });
+
+  test("a vendored item's folder depends on its kind", () {
+    String vendored(String kind, String category, String id, String path) =>
+        jsonEncode({
+          'schema': 1,
+          'items': {
+            id: {
+              'version': '1.0.0',
+              'kind': kind,
+              'origin': 'vendored',
+              'category': category,
+              'path': path,
+            },
+          },
+        });
+    Matcher refused(String want) => throwsA(
+      isA<StoreFormatException>().having(
+        (e) => e.message,
+        'message',
+        contains('lives in "$want"'),
+      ),
+    );
+
+    // Editor extensions and kits are plugins, in plugins/.
+    for (final (kind, category, id) in [
+      ('kit', 'kits', 'just_kit'),
+      ('editor-extension', 'editors', 'just_tool'),
+    ]) {
+      expect(
+        StoreLock.parse(
+          vendored(kind, category, id, 'plugins/$category/$id'),
+        ).items[id]!.path,
+        'plugins/$category/$id',
+        reason: kind,
+      );
+      expect(
+        () => StoreLock.parse(
+          vendored(kind, category, id, 'packages/$category/$id'),
+        ),
+        refused('plugins/$category/$id'),
+        reason: kind,
+      );
+    }
+    // Content stays in packages/.
+    expect(
+      () => StoreLock.parse(
+        vendored(
+          'content',
+          'characters',
+          'just_art_knight',
+          'plugins/characters/just_art_knight',
+        ),
+      ),
+      refused('packages/characters/just_art_knight'),
+    );
+    // A pub.dev library or a template is never copied in.
+    for (final kind in ['runtime-library', 'template']) {
+      expect(
+        () => StoreLock.parse(
+          vendored(kind, 'libraries', 'just_x', 'packages/libraries/just_x'),
+        ),
+        throwsA(
+          isA<StoreFormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('never copied into the project'),
+          ),
+        ),
+        reason: kind,
+      );
+    }
+    // A linked kit is someone's checkout, wherever it is.
+    expect(
+      StoreLock.parse(
+        jsonEncode({
+          'schema': 1,
+          'items': {
+            'just_platformer_kit': {
+              'version': '0.1.0',
+              'kind': 'kit',
+              'origin': 'linked',
+              'path': 'packages/just_platformer_kit',
+            },
+          },
+        }),
+      ).items['just_platformer_kit']!.path,
+      'packages/just_platformer_kit',
+    );
+  });
 }

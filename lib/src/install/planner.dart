@@ -6,6 +6,7 @@ import 'dart:io';
 
 import '../catalog/item_manifest.dart';
 import '../catalog/json.dart';
+import '../catalog/names.dart';
 import '../catalog/semver.dart';
 import '../catalog/store_index.dart';
 import '../project/lockfile.dart';
@@ -61,11 +62,25 @@ final class StoreCatalog {
       for (final c in index.categories) {
         _categories.putIfAbsent(c.id, () => c);
       }
+      for (final r in index.removed) {
+        _removedBy['$sourceId/${r.id}'] = r;
+        if (vouches) _removedVouched.putIfAbsent(r.id, () => r);
+      }
     }
   }
 
   final Map<String, CatalogEntry> _entries = {};
   final Map<String, StoreCategory> _categories = {};
+  final Map<String, RemovedItem> _removedBy = {};
+  final Map<String, RemovedItem> _removedVouched = {};
+
+  /// Why the store took down the item [id], when it did: as the catalog it
+  /// was installed from ([source]) says, or a catalog that may vouch for
+  /// items (the official one, a folder on this machine). Another catalog
+  /// can't take down what it didn't provide.
+  RemovedItem? removal(String id, {String? source}) =>
+      (source == null ? null : _removedBy['$source/$id']) ??
+      _removedVouched[id];
 
   /// Ids two sources both list.
   final List<String> clashes = [];
@@ -81,11 +96,12 @@ final class StoreCatalog {
       _categories.values.toList()..sort((a, b) => a.order.compareTo(b.order));
 
   /// Whether [source]'s catalog may say how far the store vouches for its
-  /// items.
+  /// items: the official catalog, one made in memory, or one in a folder on
+  /// this machine (never on another machine's share).
   static bool _vouches(StoreSource? source) {
     if (source == null) return true;
     final uri = source.indexUri;
-    return uri.scheme == 'file' ||
+    return (uri.scheme == 'file' && uri.host.isEmpty) ||
         uri.scheme == 'memory' ||
         '$uri' == SourceConfig.official.url;
   }
@@ -150,9 +166,10 @@ final class ProjectState {
       if (dart != null) env['sdk'] = dart;
     }
     final folders = <String>{};
-    final packages = project.dir(StoreProject.packagesDir);
-    if (packages.existsSync()) {
-      for (final category in packages.listSync().whereType<Directory>()) {
+    for (final root in StoreProject.itemRoots) {
+      final dir = project.dir(root);
+      if (!dir.existsSync()) continue;
+      for (final category in dir.listSync().whereType<Directory>()) {
         for (final pkg in category.listSync().whereType<Directory>()) {
           final rel = project.relativeOf(pkg.path);
           if (rel != null) folders.add(rel);
@@ -186,7 +203,8 @@ final class ProjectState {
   /// `just_game_engine`, `just_game_engine_editor`.
   final Map<String, Version> environment;
 
-  /// The `packages/{category}/{name}` folders that exist.
+  /// The `packages/{category}/{name}` and `plugins/{category}/{name}`
+  /// folders that exist ([StoreProject.itemRoots]).
   final Set<String> existingFolders;
 
   /// What the installed item [id] needs from other store items.
@@ -261,11 +279,12 @@ final class PlannedChange {
   /// The item's display name.
   String get name => entry?.item.name ?? id;
 
-  /// The folder it goes in (vendored items).
+  /// The folder it goes in (vendored items): `plugins/{category}/{id}` for
+  /// an editor extension or a kit, `packages/{category}/{id}` for content.
   String? get path {
     final category = entry?.item.category ?? current?.category;
     if (!itemKind.isVendored || category == null) return current?.path;
-    return StoreProject.packagePath(category, id);
+    return StoreProject.itemPath(itemKind, category, id);
   }
 
   /// Whether new code comes in or goes: the editor restarts to load it.
@@ -462,11 +481,19 @@ final class Planner {
     return latest.version > installed ? latest : null;
   }
 
-  /// The installed items whose installed version its catalog has since
-  /// taken down (a licence problem, say), each as a warning.
+  /// The installed items the store took down (malware, a stolen asset), and
+  /// those whose installed version its catalog has since taken down (a
+  /// licence problem, say), each as a warning.
   List<PlanIssue> takedowns() => [
-    for (final id in state.lock.items.keys)
-      if (_takenDown(id) case final v?)
+    for (final MapEntry(key: id, value: locked) in state.lock.items.entries)
+      if (catalog.removal(id, source: locked.source) case final r?)
+        PlanIssue(
+          IssueLevel.warning,
+          '${_name(id)} was taken down by the store: ${r.reason} Uninstall '
+          'it.',
+          id: id,
+        )
+      else if (_takenDown(id) case final v?)
         PlanIssue(
           IssueLevel.warning,
           '${_name(id)} ${v.version} was taken down by its catalog: update '
@@ -703,6 +730,7 @@ final class Planner {
         _checkChange(change, issues);
       }
     }
+    _checkReplaced(changes, issues);
     for (final c in catalog.clashes) {
       issues.add(PlanIssue(IssueLevel.info, c));
     }
@@ -717,10 +745,59 @@ final class Planner {
         _name(other),
   ];
 
+  /// A vendored item is its package for the whole project: one that
+  /// another change in the plan fetches from pub.dev would be replaced by
+  /// it there too.
+  void _checkReplaced(List<PlannedChange> changes, List<PlanIssue> issues) {
+    final vendored = {
+      for (final c in changes)
+        if (c.entry != null && c.itemKind.isVendored) c.id: c.entry!.item,
+    };
+    for (final c in changes) {
+      final v = c.version;
+      if (v == null || c.entry == null) continue;
+      for (final name in v.pubDependencies.keys) {
+        final item = vendored[name];
+        if (item == null) continue;
+        issues.add(
+          PlanIssue(
+            IssueLevel.blocker,
+            '${_name(c.id)} needs the package "$name" from pub.dev, and '
+            '${item.name} would take its place.',
+            id: name,
+          ),
+        );
+      }
+    }
+  }
+
   void _checkChange(PlannedChange change, List<PlanIssue> issues) {
     final id = change.id;
     final item = change.entry!.item;
     final v = change.version!;
+    if (!item.isOfficial && ReservedNames.isReserved(id)) {
+      issues.add(
+        PlanIssue(
+          IssueLevel.blocker,
+          '${item.name} is called "$id", a name only the store\'s own team '
+          'gives its items, yet it comes from '
+          '${item.author?.name ?? item.publisher} (${item.trust.name}).',
+          id: id,
+        ),
+      );
+    }
+    final size = v.archive?.size ?? 0;
+    if (size > StoreArchive.maxSize) {
+      issues.add(
+        PlanIssue(
+          IssueLevel.blocker,
+          '${item.name} ${v.version} is ${(size / (1 << 20)).ceil()} MiB; '
+          'the store installs archives of up to '
+          '${StoreArchive.maxSize >> 20} MiB.',
+          id: id,
+        ),
+      );
+    }
     if (v.access == AccessLevel.entitled) {
       issues.add(
         PlanIssue(
@@ -745,6 +822,18 @@ final class Planner {
       }
     });
     if (change.current == null) {
+      if (state.graph == null && !item.isOfficial && item.kind.isVendored) {
+        // Without it the store can't tell whether the project already
+        // gets a package of this name from somewhere else.
+        issues.add(
+          PlanIssue(
+            IssueLevel.blocker,
+            'Run pub get in this project first: the store checks the '
+            'packages it already uses before adding ${item.name}.',
+            id: id,
+          ),
+        );
+      }
       final graphHasIt = state.graph?.nodes.containsKey(id) ?? false;
       if (graphHasIt && !state.foreignOverrides.containsKey(id)) {
         issues.add(
@@ -757,19 +846,62 @@ final class Planner {
         );
       }
       if (item.kind.isVendored) {
-        final path = StoreProject.packagePath(item.category, id);
-        final taken = _folderTaken(path);
+        final path = StoreProject.itemPath(item.kind, item.category, id);
+        final taken = _folderTaken(item.category, id);
         if (taken != null) {
+          // The same folder in the other root would be a second copy of the
+          // package, which pub could take instead.
+          final twice = taken.toLowerCase() == path.toLowerCase()
+              ? ''
+              : '${item.name} goes in $path, so the project would have two '
+                    'copies of it. ';
           issues.add(
             PlanIssue(
               IssueLevel.blocker,
               '$taken already exists, and the store did not put it there. '
-              'Move it away first.',
+              '${twice}Move it away first.',
               id: id,
             ),
           );
         }
       }
+    }
+    // How finished it is: asked about before it comes in.
+    switch (v.stage) {
+      case ItemStage.experimental:
+        issues.add(
+          PlanIssue(
+            IssueLevel.warning,
+            '${item.name} ${v.version} is experimental: it may change or '
+            'break between versions.',
+            id: id,
+          ),
+        );
+      case ItemStage.deprecated:
+        issues.add(
+          PlanIssue(
+            IssueLevel.warning,
+            '${item.name} is deprecated: it is no longer developed.'
+            '${v.replacedBy == null ? '' : ' Use ${_name(v.replacedBy!)} instead.'}',
+            id: id,
+          ),
+        );
+      case ItemStage.stable || ItemStage.beta || null:
+        break;
+    }
+    // What its code does, as it declares: native code has its own note.
+    final declared = {
+      ...v.permissions,
+    }..remove(v.nativePlugins.isEmpty ? null : ItemPermission.native);
+    if (declared.isNotEmpty) {
+      issues.add(
+        PlanIssue(
+          IssueLevel.warning,
+          '${item.name} ${ItemPermission.describe(declared)}, as it '
+          'declares.',
+          id: id,
+        ),
+      );
     }
     if (v.nativePlugins.isNotEmpty) {
       final plugins = v.nativePlugins.join(', ');
@@ -817,13 +949,19 @@ final class Planner {
     }
   }
 
-  /// The existing folder [path] is, when one is — as written, or (on the
-  /// file systems that ignore case, Windows's and macOS's) in another case.
-  String? _folderTaken(String path) {
+  /// The existing folder an item [id] of [category] would clash with, when
+  /// one exists: `{root}/{category}/{id}` in any of
+  /// [StoreProject.itemRoots], not only the one the item goes in — as
+  /// written, or (on the file systems that ignore case, Windows's and
+  /// macOS's) in another case.
+  String? _folderTaken(String category, String id) {
     final caseless = Platform.isWindows || Platform.isMacOS;
-    for (final f in state.existingFolders) {
-      if (f == path || (caseless && f.toLowerCase() == path.toLowerCase())) {
-        return f;
+    for (final root in StoreProject.itemRoots) {
+      final path = '$root/$category/$id';
+      for (final f in state.existingFolders) {
+        if (f == path || (caseless && f.toLowerCase() == path.toLowerCase())) {
+          return f;
+        }
       }
     }
     return null;

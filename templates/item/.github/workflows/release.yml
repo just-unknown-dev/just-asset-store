@@ -14,7 +14,7 @@ permissions:
 
 env:
   # The store tool, at a version that never moves under this workflow.
-  STORE_VERSION: 0.1.0
+  STORE_VERSION: 0.2.0
 
 jobs:
   release:
@@ -39,13 +39,21 @@ jobs:
             || { echo "Tag $TAG but pubspec says $version"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      # Your claim code (the store's Publish page shows it) says your store
+      # account may publish this package: the store lists a release only
+      # when its just_release.json carries it.
       - name: Pack
         env:
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
+          CLAIM: ${{ vars.JUST_STORE_CLAIM }}
         run: |
+          test -n "$CLAIM" || {
+            echo "::error::Set the repository variable JUST_STORE_CLAIM to your claim code (Settings → Secrets and variables → Actions → Variables)."
+            exit 1
+          }
           dart pub global run just_asset_store:just_plugin store pack . \
-            -o dist --tag "$TAG" \
+            -o dist --tag "$TAG" --claim "$CLAIM" \
             --url "https://github.com/$REPO/releases/download/$TAG"
 
       - name: Release notes
@@ -57,10 +65,14 @@ jobs:
           test -s "$RUNNER_TEMP/notes.md" \
             || { echo "CHANGELOG.md has no '## $VERSION' section"; exit 1; }
 
+      # A draft first, published once every file is attached: with release
+      # immutability on (the store requires it), a published release can't
+      # gain or change files.
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" dist/* --title "$TAG" \
+          gh release create "$TAG" dist/* --draft --title "$TAG" \
             --notes-file "$RUNNER_TEMP/notes.md"
+          gh release edit "$TAG" --draft=false

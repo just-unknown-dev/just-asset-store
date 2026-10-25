@@ -1,6 +1,7 @@
 /// Rebuilding installed packages from the lockfile, as `pub get` does for
-/// hosted ones — for a fresh clone of a project that keeps
-/// `packages/{category}/` out of git, or after a folder was deleted.
+/// hosted ones — for a fresh clone of a project that keeps the installed
+/// items (`plugins/{category}/`, `packages/{category}/`) out of git, or
+/// after a folder was deleted.
 library;
 
 import 'dart:io';
@@ -88,6 +89,7 @@ abstract final class StoreRestore {
           kind: item.kind,
           category: item.category ?? '',
           versions: [StoreItemVersion(version: version)],
+          trust: item.official ? TrustLevel.official : TrustLevel.community,
         );
         // No catalog here: the lockfile's pin is what it is checked against.
         final checked = PackageCheck.check(
@@ -164,12 +166,18 @@ abstract final class StoreRestore {
           'was not fetched.',
         );
       }
-      bytes = File.fromUri(uri).readAsBytesSync();
+      final file = File.fromUri(uri);
+      if (file.lengthSync() > StoreArchive.maxSize) {
+        throw const DownloadException(
+          'The archive is larger than the store downloads.',
+        );
+      }
+      bytes = file.readAsBytesSync();
     } else {
       bytes = await HttpStoreSource(
         uri,
         client: client,
-      ).readBytes(uri, cancel: cancel, maxBytes: 1024 * 1024 * 1024);
+      ).readBytes(uri, cancel: cancel, maxBytes: StoreArchive.maxSize);
     }
     if (Sha256.hexOf(bytes) != sha256) {
       throw const DownloadException(

@@ -8,6 +8,7 @@ import 'package:just_core_cli/just_core_cli.dart';
 import '../asset_store.dart';
 import '../catalog/store_index.dart';
 import '../install/installer.dart';
+import '../install/item_source.dart';
 import '../install/linker.dart';
 import '../install/package_check.dart';
 import '../install/planner.dart';
@@ -166,6 +167,14 @@ abstract class StoreProjectCommand extends JustCommand {
 
   /// Prints [plan], asks, and applies it. Exit code 0 when applied or
   /// nothing to do, 1 when blocked or declined.
+  /// Where [entry] comes from and how finished it is: `Official · Beta`.
+  /// A stable item shows no stage.
+  String tags(CatalogEntry entry, LockedItem? installed) => [
+    ItemSource.of(entry: entry, installed: installed).label,
+    if (entry.item.stage case final stage? when stage != ItemStage.stable)
+      stage.label,
+  ].join(' · ');
+
   Future<int> applyPlan(AssetStore store, InstallPlan plan) async {
     printPlan(plan);
     output.result = planJson(plan);
@@ -407,7 +416,7 @@ final class ListCommand extends StoreProjectCommand {
       final i = e.value;
       final flags = [
         i.kind.id,
-        i.origin.name,
+        ItemSource.ofInstalled(i).label,
         if (!i.direct) 'dependency',
         if (i.system) 'system',
       ].join(', ');
@@ -464,6 +473,9 @@ final class SearchCommand extends StoreProjectCommand {
           'summary': e.item.summary,
           'trust': e.item.trust.name,
           'source': e.sourceId,
+          'from': ItemSource.of(entry: e, installed: installed[e.item.id]).id,
+          'stage': e.item.stage?.id,
+          'replacedBy': e.item.replacedBy,
           'installed': installed[e.item.id]?.version,
         },
     ];
@@ -477,7 +489,7 @@ final class SearchCommand extends StoreProjectCommand {
       final latest = item.latest == null ? '' : ' ${item.latest!.version}';
       output.line(
         '$mark ${item.id}$latest  ${item.name} — ${item.kind.id}, '
-        '${item.category}${item.trust == TrustLevel.official ? '' : ', ${item.trust.name}'}',
+        '${item.category} · ${tags(e, installed[item.id])}',
       );
       if (item.summary.isNotEmpty) output.line('    ${item.summary}');
     }
@@ -502,22 +514,52 @@ final class InfoCommand extends StoreProjectCommand {
     final project = storeProject;
     final store = storeFor(project);
     final loaded = await loadCatalog(store);
+    final installed = project.readLock().items[id];
+    final removal = loaded.catalog.removal(id, source: installed?.source);
+    if (removal != null) {
+      output
+        ..result = {'id': id, 'removed': removal.reason}
+        ..warn(
+          '$id was taken down by the store: ${removal.reason}'
+          '${installed == null ? '' : ' Uninstall it.'}',
+        );
+      return installed == null ? 1 : 0;
+    }
     final entry = loaded.catalog.entry(id);
     if (entry == null) throw CommandFailure('No item "$id" in the catalogs.');
     final item = entry.item;
-    final installed = project.readLock().items[id];
     output.result = {
       ...item.toJson(),
       'source': entry.sourceId,
+      'from': ItemSource.of(entry: entry, installed: installed).id,
+      'stage': item.stage?.id,
       'installed': installed?.toJson(),
     };
     output
       ..line('${item.name} (${item.id})')
-      ..line('  ${item.kind.id}, ${item.category}, ${item.trust.name}');
+      ..line('  ${item.kind.id}, ${item.category} · ${tags(entry, installed)}');
+    switch (item.stage) {
+      case ItemStage.deprecated:
+        final by = item.replacedBy;
+        output.warn(
+          '${item.name} is deprecated: it is no longer developed.'
+          '${by == null ? '' : ' Use ${loaded.catalog.entry(by)?.item.name ?? by} ($by) instead.'}',
+        );
+      case ItemStage.experimental:
+        output.line('  Experimental: it may change or break between versions.');
+      case ItemStage.stable || ItemStage.beta || null:
+        break;
+    }
     if (item.summary.isNotEmpty) output.line('  ${item.summary}');
     if (item.author != null) output.line('  by ${item.author!.name}');
     if (item.license != null) output.line('  licence ${item.license!.spdx}');
     if (item.sourceRepo != null) output.line('  ${item.sourceRepo}');
+    final latest = item.latest;
+    if (latest != null && latest.permissions.isNotEmpty) {
+      output.line(
+        '  ${latest.version} ${ItemPermission.describe(latest.permissions)}.',
+      );
+    }
     output.line('  versions:');
     for (final v in item.versions.reversed) {
       final marks = [
@@ -690,9 +732,10 @@ final class VendorCommand extends StoreProjectCommand {
 
   @override
   String get description =>
-      'Copy linked items into packages/{category}/{name}/ as installed items '
-      '(in a copy of the project without overrides pointing at the '
-      'checkouts).';
+      'Copy linked items into the project as installed items: editor tools '
+      'and kits into plugins/{category}/{name}/, content into '
+      'packages/{category}/{name}/ (in a copy of the project without '
+      'overrides pointing at the checkouts).';
 
   @override
   String get invocation => '${context.invokedAs} store vendor <id>...';

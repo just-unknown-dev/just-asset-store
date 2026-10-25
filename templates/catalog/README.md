@@ -1,6 +1,6 @@
 # A Just Asset Store catalog
 
-This repository is a store catalog of your own, served from GitHub Pages: every merge to `main` builds `index.json` and publishes it at `https://<owner>.github.io/<repo>/index.json`. Projects read it once it is added as a source: `just store sources add https://<owner>.github.io/<repo>/index.json` (or the editor's Asset Store → Sources). The items' archives aren't stored here: each lives on a GitHub Release in its own repository, and the catalog pins it by SHA-256.
+This repository is a store catalog of your own, served from GitHub Pages: every merge to `main` builds the catalog and publishes it at `https://<owner>.github.io/<repo>/index.json` — a small `index.json` naming pieces (`catalog/<sha256>.json`), so an editor that read it before fetches only what changed. Projects read it once it is added as a source: `just store sources add https://<owner>.github.io/<repo>/index.json` (or the editor's Asset Store → Sources). The items' archives aren't stored here: each lives on a GitHub Release in its own repository, and the catalog pins it by SHA-256.
 
 The store vouches only for what its official catalog lists: the items of every other catalog, this one included, are shown to users as community items, whatever `trust` says here.
 

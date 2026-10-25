@@ -40,6 +40,12 @@ final class Downloader {
         '${item.name} ${version.version} has no archive.',
       );
     }
+    if (pin.size > StoreArchive.maxSize) {
+      throw DownloadException(
+        '${item.name} ${version.version} is ${_mib(pin.size)}; the store '
+        'downloads archives of up to ${_mib(StoreArchive.maxSize)}.',
+      );
+    }
     final cached = cache?.archive(pin.sha256);
     if (cached != null) {
       onProgress?.call(cached.length, cached.length);
@@ -66,6 +72,8 @@ final class Downloader {
     return bytes;
   }
 
+  static String _mib(int bytes) => '${(bytes / (1 << 20)).ceil()} MiB';
+
   /// The picture at [reference] (relative to [source]'s catalog), as a
   /// cached file; null when it can't be fetched. Only a catalog in a folder
   /// on this machine has pictures on disk: never one on the web, and never
@@ -76,6 +84,15 @@ final class Downloader {
       if (source.indexUri.scheme != 'file' || uri.host.isNotEmpty) return null;
       final file = File.fromUri(uri);
       return file.existsSync() ? file : null;
+    }
+    // A picture is fetched as soon as its card shows: from the web only
+    // over https, and never from this machine's network for a catalog on
+    // the web (a catalog tried out on this machine may use plain http).
+    final local = source.indexUri.scheme == 'http' &&
+        StoreSource.isPrivateHost(source.indexUri.host);
+    if ((uri.scheme != 'https' && !(uri.scheme == 'http' && local)) ||
+        source.leadsInside(uri)) {
+      return null;
     }
     final c = cache;
     if (c == null) return null;

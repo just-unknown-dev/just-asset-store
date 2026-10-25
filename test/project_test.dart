@@ -93,10 +93,6 @@ void main() {
         'lib',
       );
       expect(project.relativeOf(Directory.systemTemp.path), isNull);
-      expect(
-        StoreProject.packagePath('characters', 'k'),
-        'packages/characters/k',
-      );
       File('${dir.path}/just_store.lock.json').writeAsStringSync('{oops');
       expect(
         project.readLock,
@@ -108,6 +104,44 @@ void main() {
           ),
         ),
       );
+    });
+
+    test('content goes in packages/, editor tools and kits in plugins/', () {
+      expect(StoreProject.packagesDir, 'packages');
+      expect(StoreProject.pluginsDir, 'plugins');
+      expect(StoreProject.itemRoots, ['packages', 'plugins']);
+      expect(
+        StoreProject.itemPath(ItemKind.content, 'characters', 'k'),
+        'packages/characters/k',
+      );
+      expect(
+        StoreProject.itemPath(ItemKind.kit, 'kits', 'k'),
+        'plugins/kits/k',
+      );
+      expect(
+        StoreProject.itemPath(ItemKind.editorExtension, 'editors', 'k'),
+        'plugins/editors/k',
+      );
+      // Every kind copied in goes in one of the roots the planner scans.
+      for (final kind in ItemKind.values) {
+        expect(kind.isPlugin, kind.isCode && kind.isVendored, reason: kind.id);
+        final folder = kind.installFolder;
+        if (folder == null) {
+          expect(kind.isVendored, isFalse, reason: kind.id);
+          expect(
+            () => StoreProject.itemPath(kind, 'libraries', 'k'),
+            throwsArgumentError,
+            reason: kind.id,
+          );
+          continue;
+        }
+        expect(StoreProject.itemRoots, contains(folder), reason: kind.id);
+        expect(
+          folder,
+          kind.isPlugin ? StoreProject.pluginsDir : StoreProject.packagesDir,
+          reason: kind.id,
+        );
+      }
     });
   });
 
@@ -329,15 +363,15 @@ void main() {
         'assets/scenes/other.scene.json': '{"type": "TransformComponent"}\n',
         'packages/characters/user_pack/assets/x.json':
             '{"atlas": "packages/just_kit/a.json"}\n',
-        'packages/kits/just_kit/assets/self.json':
+        'plugins/kits/just_kit/assets/self.json':
             '{"a": "packages/just_kit/b.json"}\n',
       });
       final refs = ReferenceScan.find(
         StoreProject(dir.path),
         'just_kit',
         componentTypes: ['KitComponent'],
-        alsoSearch: ['packages/characters/user_pack', 'packages/kits/just_kit'],
-        excluding: 'packages/kits/just_kit',
+        alsoSearch: ['packages/characters/user_pack', 'plugins/kits/just_kit'],
+        excluding: 'plugins/kits/just_kit',
       );
       expect(
         {for (final r in refs) '${r.kind.name} ${r.file}'},

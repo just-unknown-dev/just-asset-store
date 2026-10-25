@@ -5,7 +5,10 @@ library;
 import 'dart:async';
 import 'dart:io';
 
+import 'package:just_core_cli/fetch.dart';
+
 import 'catalog/item_manifest.dart';
+import 'catalog/json.dart';
 import 'catalog/store_index.dart';
 import 'install/installer.dart';
 import 'install/planner.dart';
@@ -49,6 +52,15 @@ final class SourceStatus {
 
   /// The name to show.
   String get name => info?.name ?? config.name ?? config.url;
+
+  /// What went wrong, as a sentence for a person; null when nothing did.
+  String? get problem => switch (error) {
+    null => null,
+    FetchException(:final message) => message,
+    DownloadException(:final message) => message,
+    StoreFormatException() => 'Its catalog could not be read ($error).',
+    final e => '$e',
+  };
 }
 
 /// The merged catalog and how each source fared.
@@ -117,7 +129,7 @@ final class AssetStore {
       try {
         final source = sourceFor(config);
         final fetched = await source.fetchIndex(refresh: refresh);
-        final index = await source.withPages(fetched.index);
+        final index = fetched.index;
         catalogs.add((index.source.id, source, index));
         statuses.add(
           SourceStatus(

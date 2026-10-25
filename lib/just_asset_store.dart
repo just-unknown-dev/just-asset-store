@@ -2,9 +2,10 @@
 /// installing items into a project as packages.
 ///
 /// Every store item is a Dart package. Content (art, sound, tilesets) is an
-/// asset-only package; editor extensions and kits are code. Installed items
-/// live in `packages/{category}/{name}/`, so their assets load as
-/// `packages/<name>/...` — the same key in the editor and in the game.
+/// asset-only package installed in `packages/{category}/{name}/`; its
+/// assets load as `packages/<name>/...` — the same key in the editor and in
+/// the game. Editor extensions and kits are code, plugins that come only
+/// through the store, installed in `plugins/{category}/{name}/`.
 ///
 /// **On every platform, the web included (JavaScript and WebAssembly):**
 /// - [StoreIndex], a catalog's `index.json`, with its [StoreItem]s and
@@ -30,6 +31,8 @@ library;
 export 'src/archive/safe_paths.dart';
 export 'src/archive/zip_reader.dart';
 export 'src/archive/zip_writer.dart';
+export 'src/catalog/catalog_files.dart';
+export 'src/catalog/claim.dart';
 export 'src/catalog/item_manifest.dart';
 export 'src/catalog/json.dart';
 export 'src/catalog/names.dart';

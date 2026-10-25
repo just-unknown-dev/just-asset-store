@@ -26,10 +26,11 @@ import 'planner.dart';
 /// The store lists it, registers its modules and extensions, and finds its
 /// assets; it never moves, updates or hashes it.
 ///
-/// **Vendoring** copies a linked item into `packages/{category}/{name}/`
-/// as an ordinary installed item, through the same checked, all-or-nothing
-/// install — what a project does before it is shared, so that a clone has
-/// the packages without the checkouts.
+/// **Vendoring** copies a linked item into the project as an ordinary
+/// installed item, through the same checked, all-or-nothing install: an
+/// editor extension or a kit into `plugins/{category}/{name}/`, content into
+/// `packages/{category}/{name}/`. A project does this before it is shared,
+/// so that a clone has the packages without the checkouts.
 abstract final class StoreLinker {
   /// Records the packages in [folders] (each with a `just_store.json`) as
   /// linked items, and regenerates the registry files, all or nothing and
@@ -83,9 +84,11 @@ abstract final class StoreLinker {
         return true;
       });
 
-  /// Copies the linked items [ids] into `packages/{category}/{name}/` as
-  /// ordinary installed items, in one install: their pubspec entries
-  /// become the store's, and pub resolves them from the copies.
+  /// Copies the linked items [ids] into the project as ordinary installed
+  /// items, in one install — editor extensions and kits into
+  /// `plugins/{category}/{name}/`, content into
+  /// `packages/{category}/{name}/`: their pubspec entries become the
+  /// store's, and pub resolves them from the copies.
   ///
   /// Refused while the live overrides file points one of them at a
   /// checkout — a developer's monorepo: vendor in a clean copy of the
@@ -124,7 +127,10 @@ abstract final class StoreLinker {
       }
       final PackResult packed;
       try {
-        packed = Packer.pack(project.dir(locked.path!));
+        packed = Packer.pack(
+          project.dir(locked.path!),
+          trust: TrustLevel.official,
+        );
       } on PackageCheckException catch (e) {
         problems.add('$e');
         continue;
@@ -141,16 +147,14 @@ abstract final class StoreLinker {
         kind: m.kind,
         category: m.category,
         versions: [
-          StoreItemVersion(
-            version: m.version,
-            archive: StoreArchive(
-              url: archive,
-              sha256: packed.sha256,
-              size: packed.bytes.length,
-            ),
-            dependencies: m.dependencies,
+          StoreItemVersion.fromJson(
+            JsonFields(packed.versionJson(archive)),
+            m.kind,
           ),
         ],
+        // A checkout on this machine, linked on purpose: its owner vouches
+        // for it, as for a catalog in a folder here.
+        trust: TrustLevel.official,
       );
       items.add(item);
       changes.add(

@@ -3,4 +3,10 @@
 library;
 
 export 'package:just_core_cli/just_core_cli.dart'
-    show ZipFormatException, ZipLimits, ZipEntry, ZipArchive;
+    show
+        ZipFormatException,
+        ZipLimits,
+        ZipEntry,
+        ZipArchive,
+        ZipDirectory,
+        ZipNeedsBytes;

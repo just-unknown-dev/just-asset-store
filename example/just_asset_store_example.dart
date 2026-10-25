@@ -99,7 +99,9 @@ void main() {
           kind: item.kind,
           origin: ItemOrigin.vendored,
           category: item.category,
-          path: 'packages/${item.category}/${item.id}',
+          // Its folder: content goes in packages/, editor tools and kits in
+          // plugins/.
+          path: '${item.kind.installFolder}/${item.category}/${item.id}',
           source: catalog.source.id,
           archive: LockedArchive(pin.url, pin.sha256),
         ),

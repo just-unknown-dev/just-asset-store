@@ -7,9 +7,12 @@ import 'dart:typed_data';
 
 import 'package:just_core_cli/fetch.dart';
 
+import '../catalog/catalog_files.dart';
+import '../catalog/claim.dart';
 import '../catalog/item_manifest.dart';
 import '../catalog/json.dart';
 import '../catalog/store_index.dart';
+import '../crypto/sha256.dart';
 import '../version.dart';
 
 export 'package:just_core_cli/fetch.dart'
@@ -152,75 +155,117 @@ abstract class StoreSource {
     final uri = resolve(archive.url);
     // Plain http is only ever fetched from this machine: a catalog on the
     // web must not make the store call this machine's own services.
-    if (uri.scheme == 'http' && indexUri.scheme == 'https') {
+    if ((uri.scheme == 'http' && indexUri.scheme == 'https') ||
+        leadsInside(uri)) {
       throw SourceException(
         '${item.name} ${version.version}: a catalog on the web points its '
-        'archive at this machine, which the store refuses.',
+        'archive at this machine or its network, which the store refuses.',
         uri: uri,
       );
     }
     return uri;
   }
 
-  /// The most pages a catalog may be split into.
-  static const int maxPages = 100;
-
-  /// [first], the catalog's first page, with every page its `next` links
-  /// lead to, read from this source: one catalog.
-  Future<StoreIndex> withPages(StoreIndex first) async {
-    if (first.next == null) return first;
-    final items = [...first.items];
-    final categories = {for (final c in first.categories) c.id: c};
-    final skipped = [...first.skipped];
-    final seen = {'$indexUri'};
-    var next = first.next;
-    for (var page = 2; next != null; page++) {
-      if (page > maxPages) {
-        throw SourceException(
-          'The catalog has more than $maxPages pages.',
-          uri: indexUri,
-        );
-      }
-      final uri = resolve(next);
-      if (!seen.add('$uri')) {
-        throw SourceException(
-          'The catalog\'s pages lead in a circle.',
-          uri: uri,
-        );
-      }
-      final StoreIndex part;
-      try {
-        part = StoreIndex.parse(
-          _utf8(await readBytes(uri, maxBytes: 32 * 1024 * 1024)),
-        );
-      } on StoreFormatException catch (e) {
-        throw e.inFile('$uri');
-      }
-      for (final c in part.categories) {
-        categories.putIfAbsent(c.id, () => c);
-      }
-      items.addAll(part.items);
-      skipped.addAll(part.skipped);
-      next = part.next;
-    }
-    final ids = <String>{};
-    for (final i in items) {
-      if (!ids.add(i.id)) {
-        throw StoreFormatException(
-          '"${i.id}" is listed on two of the catalog\'s pages.',
-          file: '$indexUri',
-        );
-      }
-    }
-    return StoreIndex(
-      source: first.source,
-      categories: categories.values.toList()
-        ..sort((a, b) => a.order.compareTo(b.order)),
-      items: items,
-      generatedAt: first.generatedAt,
-      skipped: skipped,
-    );
+  /// Whether [target], an address this catalog names, leads from the web
+  /// to this machine or its private network: a catalog on the web must not
+  /// make the store call the services there (a router, a cloud's metadata
+  /// address). A catalog served from such an address — one being tried out
+  /// on this machine — may name its neighbours.
+  bool leadsInside(Uri target) {
+    if (target.scheme != 'http' && target.scheme != 'https') return false;
+    if (indexUri.scheme != 'http' && indexUri.scheme != 'https') return false;
+    return isPrivateHost(target.host) && !isPrivateHost(indexUri.host);
   }
+
+  /// Whether [host] is this machine or on a private network: `localhost`,
+  /// loopback, private, shared and link-local addresses, `.local` and
+  /// `.internal` names — and an address written as a bare number, which
+  /// some systems read as an IPv4 address.
+  static bool isPrivateHost(String host) {
+    final h = host.toLowerCase();
+    if (h.isEmpty ||
+        h == 'localhost' ||
+        h.endsWith('.localhost') ||
+        h.endsWith('.local') ||
+        h.endsWith('.internal')) {
+      return true;
+    }
+    final ip = InternetAddress.tryParse(h);
+    if (ip == null) {
+      // `2130706433`, `0x7f.1`, `0177.0.0.1`: numbers, not names.
+      return RegExp(r'^(0x[0-9a-f]+|[0-9]+)(\.(0x[0-9a-f]+|[0-9]+))*$').hasMatch(h);
+    }
+    if (ip.isLoopback || ip.isLinkLocal || ip.isMulticast) return true;
+    final b = ip.rawAddress;
+    if (ip.type == InternetAddressType.IPv4) {
+      return b[0] == 0 ||
+          b[0] == 10 ||
+          (b[0] == 100 && b[1] >= 64 && b[1] <= 127) ||
+          (b[0] == 172 && b[1] >= 16 && b[1] <= 31) ||
+          (b[0] == 192 && b[1] == 168);
+    }
+    // IPv6: unique local fc00::/7, and IPv4 inside IPv6 (::ffff:a.b.c.d).
+    if ((b[0] & 0xfe) == 0xfc) return true;
+    final mapped = b.sublist(0, 12).every((x) => x == 0) ||
+        (b.sublist(0, 10).every((x) => x == 0) && b[10] == 0xff && b[11] == 0xff);
+    return mapped && isPrivateHost(b.sublist(12).join('.'));
+  }
+
+  /// The largest `index.json` read: a catalog may list its items itself.
+  static const int maxIndexBytes = 32 * 1024 * 1024;
+
+  /// How many of a catalog's pieces are fetched at once.
+  static const int piecesAtOnce = 6;
+
+  /// The catalog [text] (the `index.json` at [file]) describes: one that
+  /// lists its items itself, or a root whose pieces [piece] reads. Throws
+  /// [StoreFormatException] naming the file at fault.
+  static Future<StoreIndex> _catalogFrom(
+    String text,
+    Future<Uint8List> Function(CatalogPieceRef ref) piece, {
+    required String file,
+  }) async {
+    final CatalogRoot root;
+    try {
+      final json = JsonFields.parse(text);
+      if (!CatalogRoot.isSplit(json)) return StoreIndex.fromJson(json);
+      root = CatalogRoot.fromJson(json);
+    } on StoreFormatException catch (e) {
+      throw e.inFile(file);
+    }
+    final pieces = await _inTurn(
+      root.pieces,
+      (ref) async =>
+          CatalogPiece.read(await piece(ref), ref, buckets: root.buckets),
+    );
+    try {
+      return root.assemble(pieces);
+    } on StoreFormatException catch (e) {
+      throw e.file == null ? e.inFile(file) : e;
+    }
+  }
+}
+
+/// [work] done for every one of [list], [StoreSource.piecesAtOnce] at a
+/// time, the results in [list]'s order.
+Future<List<R>> _inTurn<T, R>(
+  List<T> list,
+  Future<R> Function(T) work,
+) async {
+  final out = List<R?>.filled(list.length, null);
+  var next = 0;
+  Future<void> worker() async {
+    while (next < list.length) {
+      final i = next++;
+      out[i] = await work(list[i]);
+    }
+  }
+
+  await Future.wait([
+    for (var w = 0; w < StoreSource.piecesAtOnce && w < list.length; w++)
+      worker(),
+  ]);
+  return out.cast<R>();
 }
 
 /// A catalog held in memory: an index and its archives' bytes — what
@@ -289,11 +334,30 @@ final class FolderStoreSource extends StoreSource {
     if (!file.existsSync()) {
       throw SourceException('There is no catalog here.', uri: indexUri);
     }
+    final String text;
     try {
-      return FetchedIndex(StoreIndex.parse(await file.readAsString()));
+      text = _utf8(await file.readAsBytes());
     } on StoreFormatException catch (e) {
       throw e.inFile(file.path);
     }
+    return FetchedIndex(
+      await StoreSource._catalogFrom(text, _readPiece, file: file.path),
+    );
+  }
+
+  Future<Uint8List> _readPiece(CatalogPieceRef ref) async {
+    final uri = resolve(ref.path);
+    final piece = File.fromUri(uri);
+    if (!piece.existsSync()) {
+      throw SourceException('A piece of the catalog is missing.', uri: uri);
+    }
+    if (piece.lengthSync() != ref.size) {
+      throw StoreFormatException(
+        'It is not the piece index.json names (its size differs).',
+        file: piece.path,
+      );
+    }
+    return piece.readAsBytes();
   }
 
   @override
@@ -370,31 +434,94 @@ final class HttpStoreSource extends StoreSource {
       'just_asset_store/$justAssetStoreVersion '
       '(+https://github.com/just-unknown-dev/just-asset-store)';
 
+  /// Reads the catalog: `index.json` (an unchanged one costs one small
+  /// request), then — for a catalog in pieces — only the pieces not cached
+  /// yet, a few at a time. A catalog that can't be read whole never
+  /// replaces the last good one; offline, that one is read from the cache.
   @override
-  Future<FetchedIndex> fetchIndex({bool refresh = false}) async {
+  Future<FetchedIndex> fetchIndex({bool refresh = false}) =>
+      _fetchIndex(refresh: refresh, retried: false);
+
+  Future<FetchedIndex> _fetchIndex({
+    required bool refresh,
+    required bool retried,
+  }) async {
+    final pieces = _pieceCache();
     StoreIndex? fresh;
+    Set<String>? freshPieces;
     try {
       final got = await _fetcher.getCached(
         indexUri,
         cache: _cacheFile(),
         refresh: refresh,
-        maxBytes: 32 * 1024 * 1024,
-        // Parsed before it is cached, so a broken catalog never replaces a
-        // good copy.
-        decode: (bytes) {
+        maxBytes: StoreSource.maxIndexBytes,
+        // Read whole before it is cached, so a broken catalog never
+        // replaces a good copy.
+        decode: (bytes) async {
           final text = _utf8(bytes);
-          fresh = StoreIndex.parse(text);
+          final (index, used) = await _read(text, pieces, online: true);
+          fresh = index;
+          freshPieces = used;
           return text;
         },
       );
-      return FetchedIndex(
-        fresh ?? StoreIndex.parse(got.text),
-        offline: got.offline,
-        error: got.error,
-      );
-    } on StoreFormatException catch (e) {
-      throw e.inFile('$indexUri');
+      final index = fresh;
+      if (index != null) {
+        pieces?.retainOnly(freshPieces!);
+        return FetchedIndex(index);
+      }
+      final (cached, _) = await _read(got.text, pieces, online: !got.offline);
+      return FetchedIndex(cached, offline: got.offline, error: got.error);
+    } on FetchException catch (e) {
+      // A piece the new index.json names is gone: another catalog was
+      // published between the two requests. Ask for index.json once more.
+      if (e.statusCode == 404 && e.uri != indexUri && !retried) {
+        return _fetchIndex(refresh: true, retried: true);
+      }
+      rethrow;
     }
+  }
+
+  /// The catalog [text] describes, its pieces read from [cache] or — when
+  /// [online] — fetched; and the SHA-256 of every piece it uses.
+  Future<(StoreIndex, Set<String>)> _read(
+    String text,
+    HashedFiles? cache, {
+    required bool online,
+  }) async {
+    final used = <String>{};
+    final index = await StoreSource._catalogFrom(text, (ref) async {
+      used.add(ref.sha256);
+      final cached = cache?.read(ref.sha256);
+      if (cached != null) return cached;
+      final uri = resolve(ref.path);
+      if (!online) {
+        throw SourceException(
+          'Part of the catalog was never downloaded, and the catalog can\'t '
+          'be reached.',
+          uri: uri,
+        );
+      }
+      final bytes = await readBytes(uri, maxBytes: ref.size);
+      // Only what matches its name is kept (CatalogPiece.read checks it
+      // again, and says what is wrong).
+      if (bytes.length == ref.size && Sha256.hexOf(bytes) == ref.sha256) {
+        cache?.write(ref.sha256, bytes);
+      }
+      return bytes;
+    }, file: '$indexUri');
+    return (index, used);
+  }
+
+  /// Where this catalog's pieces are cached, beside its `index.json`.
+  HashedFiles? _pieceCache() {
+    final file = _cacheFile();
+    if (file == null) return null;
+    final path = file.path;
+    return HashedFiles(
+      '${path.substring(0, path.length - '.json'.length)}.pieces',
+      ext: 'json',
+    );
   }
 
   @override
@@ -449,7 +576,12 @@ final class JustRelease {
     required this.tag,
     required this.manifest,
     required this.version,
+    this.claim,
   });
+
+  /// The claim code ([claimCode]) of the store account that may publish
+  /// it, when its maker put one in.
+  final String? claim;
 
   /// The file's name in every release.
   static const String fileName = GitHubRepo.manifestFile;
@@ -478,20 +610,28 @@ final class JustRelease {
     }
     final raw = json.raw('version');
     if (raw is! Map) throw json.error('version', 'Expected an object.');
+    final claim = json.optString('claim');
+    if (claim != null && !isClaimCode(claim)) {
+      throw json.error('claim', 'Not a claim code (jas1-…).');
+    }
     return JustRelease(
       tag: json.string('tag'),
       manifest: ItemManifest.fromJson(json.object('manifest')),
       version: raw.cast<String, Object?>(),
+      claim: claim,
     );
   }
 
   /// The file's text.
-  String toText() => canonicalJson({
-    'schema': currentSchema,
-    'tag': tag,
-    'manifest': manifest.toJson(),
-    'version': version,
-  });
+  String toText() => canonicalJson(
+    compactJson({
+      'schema': currentSchema,
+      'tag': tag,
+      'claim': claim,
+      'manifest': manifest.toJson(),
+      'version': version,
+    }),
+  );
 }
 
 /// A package straight from its GitHub releases, listed in no catalog: what
@@ -613,13 +753,33 @@ final class GitHubSource extends StoreSource {
       }
       version['archive'] = {...archive.cast<String, Object?>(), 'url': '$url'};
     }
+    // What it may do, and how finished it is, is what its manifest says,
+    // whatever the entry claims.
+    version['permissions'] = [
+      for (final p in ItemPermission.values)
+        if (m.permissions.contains(p)) p.id,
+    ];
+    version
+      ..remove('stage')
+      ..remove('replacedBy');
+    if (m.stage case final stage?) version['stage'] = stage.id;
+    if (m.replacedBy case final by?) version['replacedBy'] = by;
     final item = StoreItem(
       id: m.id,
       name: m.name,
       kind: m.kind,
       category: m.category,
+      summary: m.summary,
+      description: m.description,
+      tags: m.tags,
+      author: m.author,
       license: m.license,
-      previews: m.previews,
+      // Its pictures are release files beside the archive (`just store
+      // pack` puts them there), as the store's own pages find them.
+      previews: [
+        for (final path in m.previews)
+          '${repo.releaseFile(path.split('/').last, tag: release.tag)}',
+      ],
       trust: TrustLevel.community,
       publisher: repo.owner,
       sourceRepo: '${repo.url}',

@@ -107,6 +107,97 @@ void main() {
         throwsA(isA<StoreFormatException>()),
       );
     });
+
+    test('lists the native code its packages bring, which it must declare',
+        () {
+      // their_tool → nice_lib (pub.dev) → camera_x, a Flutter plugin, and
+      // path_x, with build hooks, which every project has already through
+      // engine_core, the store item it needs.
+      final pubCache = tempDir('cache');
+      writeFiles(pubCache, {
+        'nice_lib/pubspec.yaml': 'name: nice_lib\nversion: 1.0.0\n',
+        'engine_core/pubspec.yaml': 'name: engine_core\nversion: 1.0.0\n',
+        'path_x/pubspec.yaml': 'name: path_x\nversion: 1.0.0\n',
+        'path_x/hook/build.dart': 'void main(List<String> args) {}\n',
+        'camera_x/pubspec.yaml':
+            'name: camera_x\nversion: 1.0.0\nflutter:\n  plugin:\n'
+            '    platforms:\n      android:\n        package: x\n',
+      });
+      Map<String, String> resolved(String tool) => {
+        '.dart_tool/package_config.json': jsonEncode({
+          'configVersion': 2,
+          'packages': [
+            {'name': tool, 'rootUri': '../', 'packageUri': 'lib/'},
+            for (final p in ['nice_lib', 'camera_x', 'engine_core', 'path_x'])
+              {
+                'name': p,
+                'rootUri': Directory('${pubCache.path}/$p').uri.toString(),
+                'packageUri': 'lib/',
+              },
+          ],
+        }),
+        '.dart_tool/package_graph.json': jsonEncode({
+          'roots': [tool],
+          'packages': [
+            {
+              'name': tool,
+              'version': '1.0.0',
+              'dependencies': ['nice_lib', 'engine_core'],
+            },
+            {
+              'name': 'nice_lib',
+              'version': '1.0.0',
+              'dependencies': ['camera_x', 'path_x'],
+            },
+            {
+              'name': 'engine_core',
+              'version': '1.0.0',
+              'dependencies': ['path_x'],
+            },
+            {'name': 'camera_x', 'version': '1.0.0', 'dependencies': []},
+            {'name': 'path_x', 'version': '1.0.0', 'dependencies': []},
+          ],
+        }),
+      };
+      TestItem tool({List<String> permissions = const []}) => TestItem(
+        'their_tool',
+        kind: ItemKind.editorExtension,
+        category: 'editors',
+        pubDependencies: {'nice_lib': '^1.0.0'},
+        dependencies: {'engine_core': '^1.0.0'},
+        permissions: permissions,
+      );
+
+      expect(
+        () => Packer.pack(
+          packageFolder(tool(), extra: resolved('their_tool')),
+        ),
+        throwsA(
+          isA<PackageCheckException>().having(
+            (e) => e.problems.join('\n'),
+            'problems',
+            contains('It brings native code (camera_x)'),
+          ),
+        ),
+      );
+      final r = Packer.pack(
+        packageFolder(
+          tool(permissions: ['native']),
+          extra: resolved('their_tool'),
+        ),
+      );
+      expect(r.nativePlugins, ['camera_x']);
+      final json = r.versionJson('https://e.com/t.zip');
+      expect(json['nativePlugins'], ['camera_x']);
+      expect(json['permissions'], ['native']);
+
+      // Not resolved: it can't look, and says so.
+      final unresolved = Packer.pack(
+        packageFolder(tool(permissions: ['native'])),
+      );
+      expect(unresolved.nativePlugins, isEmpty);
+      expect(unresolved.warnings.join('\n'), contains('Run pub get in it'));
+    });
   });
 
   group('CatalogBuilder', () {
@@ -317,6 +408,42 @@ void main() {
         isEmpty,
         reason: 'nothing missing',
       );
+    });
+
+    test('puts a missing plugin back in plugins/', () async {
+      final dir = tempDir('restore');
+      writeFiles(dir, {'pubspec.yaml': pubspecOf('app')});
+      final source = buildCatalog(tempDir('catalog'), [
+        TestItem('just_art_knight'),
+        TestItem(
+          'just_kit',
+          kind: ItemKind.kit,
+          category: 'kits',
+          dependencies: {'just_art_knight': '^1.0.0'},
+          files: {'lib/just_kit.dart': ''},
+        ),
+      ]);
+      final project = StoreProject(dir.path);
+      final store = AssetStore(
+        project: project,
+        sources: [SourceConfig(source.indexUri.toFilePath())],
+        pub: FakePub(),
+      );
+      await store.installer().apply(
+        (await store.planner()).install('just_kit'),
+      );
+      final before = snapshot(dir);
+      expect(before.keys, contains('plugins/kits/just_kit/lib/just_kit.dart'));
+
+      // A clone that kept both folders out of git.
+      project.dir('plugins').deleteSync(recursive: true);
+      project.dir('packages').deleteSync(recursive: true);
+      final result = await store.restore();
+      expect(result.restored.toSet(), {'just_art_knight', 'just_kit'});
+      expect(result.problems, isEmpty);
+      expect(snapshot(dir).keys.toSet(), before.keys.toSet());
+      expect(project.dir('packages/kits').existsSync(), isFalse);
+      expect(project.dir('plugins/characters').existsSync(), isFalse);
     });
 
     test('refuses an archive that changed since it was installed', () async {

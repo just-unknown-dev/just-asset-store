@@ -136,6 +136,7 @@ void main() {
       f.exists('packages/characters/just_art_knight/just_store.json'),
       isTrue,
     );
+    expect(f.exists('plugins'), isFalse, reason: 'content is no plugin');
     final pubspec = f.read('pubspec.yaml');
     // Every line the project had is still there, in order: the store only
     // adds its block.
@@ -202,11 +203,23 @@ void main() {
     () async {
       final f = await Fixture.create();
       final result = await f.install('just_tool');
+      // A plugin: in plugins/, not packages/.
+      expect(f.exists('plugins/editors/just_tool/lib/editor.dart'), isTrue);
+      expect(f.exists('packages'), isFalse);
+      expect(
+        f.project.readLock().items['just_tool']!.path,
+        'plugins/editors/just_tool',
+      );
       final editor = PubspecEditor.parse(
         f.read('pubspec.yaml'),
         marker: storeBlock,
       );
-      expect(editor.managed('dev_dependencies').keys, ['just_tool']);
+      expect(editor.managed('dev_dependencies'), {
+        'just_tool': const PathDependency('plugins/editors/just_tool'),
+      });
+      expect(editor.managed('dependency_overrides'), {
+        'just_tool': const PathDependency('plugins/editors/just_tool'),
+      });
       expect(editor.managed('dependencies'), isEmpty);
       expect(
         f.read(StoreProject.modulesFile),
@@ -225,17 +238,39 @@ void main() {
       final lock = f.project.readLock();
       expect(lock.items.keys, ['just_art_knight', 'just_kit']);
       expect(lock.items['just_art_knight']!.direct, isFalse);
+      // The kit is a plugin, in plugins/; the art it needs is content, in
+      // packages/.
+      expect(f.exists('plugins/kits/just_kit/lib/just_kit.dart'), isTrue);
+      expect(f.exists('packages/kits'), isFalse);
+      expect(
+        f.exists(
+          'packages/characters/just_art_knight/sprites/just_art_knight.png',
+        ),
+        isTrue,
+      );
+      expect(f.exists('plugins/characters'), isFalse);
+      expect(lock.items['just_kit']!.path, 'plugins/kits/just_kit');
+      expect(
+        lock.items['just_art_knight']!.path,
+        'packages/characters/just_art_knight',
+      );
       final editor = PubspecEditor.parse(
         f.read('pubspec.yaml'),
         marker: storeBlock,
       );
-      expect(editor.managed('dependencies').keys, [
-        'just_kit',
-      ], reason: 'only what was asked for');
-      expect(editor.managed('dependency_overrides').keys, [
-        'just_art_knight',
-        'just_kit',
-      ]);
+      expect(editor.managed('dependencies'), {
+        'just_kit': const PathDependency('plugins/kits/just_kit'),
+      }, reason: 'only what was asked for');
+      expect(editor.managed('dependency_overrides'), {
+        'just_art_knight': const PathDependency(
+          'packages/characters/just_art_knight',
+        ),
+        'just_kit': const PathDependency('plugins/kits/just_kit'),
+      });
+      expect(
+        f.read('pubspec.yaml'),
+        contains('    path: plugins/kits/just_kit\r\n'),
+      );
       expect(
         f.read(StoreProject.extensionsFile),
         contains('  s0.JustKit.extension,'),
@@ -243,6 +278,24 @@ void main() {
       expect(result.setupSnippets, {'Just Kit': '// set up just_kit'});
     },
   );
+
+  test('a folder of the same name in the other root blocks it', () async {
+    // Left from an install into packages/, or someone's own copy: pub could
+    // take either.
+    final f = await Fixture.create(
+      extraFiles: {
+        'packages/kits/just_kit/pubspec.yaml': pubspecOf('just_kit'),
+      },
+    );
+    final before = snapshot(f.dir);
+    final plan = (await f.planner()).install('just_kit');
+    expect(
+      plan.blockers.single.message,
+      startsWith('packages/kits/just_kit already exists'),
+    );
+    await expectLater(f.installer.apply(plan), throwsA(isA<InstallFailure>()));
+    _expectSame(snapshot(f.dir), before);
+  });
 
   test('a runtime library is a hosted dependency, nothing copied', () async {
     final f = await Fixture.create();
@@ -321,7 +374,7 @@ void main() {
     expect(plan.changes.map((c) => c.id), ['just_kit', 'just_art_knight']);
     final result = await f.installer.apply(plan);
     expect(f.read('pubspec.yaml'), pubspecText);
-    expect(f.exists('packages/kits/just_kit'), isFalse);
+    expect(f.exists('plugins/kits/just_kit'), isFalse);
     expect(f.exists('packages/characters/just_art_knight'), isFalse);
     expect(f.project.readLock().items, isEmpty);
     expect(
@@ -530,7 +583,11 @@ void main() {
         isA<InstallFailure>().having(
           (e) => e.message,
           'message',
-          contains('pub would look for another package named just_art_knight'),
+          allOf(
+            contains('disagree on the packages it needs from pub.dev'),
+            contains('just_art_knight'),
+            contains('would look for another package'),
+          ),
         ),
       ),
     );
@@ -682,7 +739,7 @@ void main() {
     final config = PackageConfig.read(dir.path)!;
     expect(
       config.packages['just_kit']!.rootPath,
-      endsWith('/packages/kits/just_kit'),
+      endsWith('/plugins/kits/just_kit'),
     );
 
     // And uninstalling resolves again without it.

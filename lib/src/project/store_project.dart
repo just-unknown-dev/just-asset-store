@@ -4,6 +4,7 @@ library;
 import 'package:just_core_cli/project.dart';
 
 import '../catalog/json.dart';
+import '../catalog/store_index.dart';
 import 'lockfile.dart';
 
 export 'package:just_core_cli/project.dart'
@@ -35,8 +36,16 @@ final class StoreProject extends JustProject {
   /// at a time whoever makes it.
   static const String workDir = JustProject.workDir;
 
-  /// The folder installed items go into.
+  /// The folder content items go into: `packages/{category}/{name}/`.
   static const String packagesDir = JustProject.packagesDir;
+
+  /// The folder plugins — editor extensions and kits, the code that comes
+  /// only through the store — go into: `plugins/{category}/{name}/`.
+  static const String pluginsDir = 'plugins';
+
+  /// Every folder the store installs items into, each item in
+  /// `{folder}/{category}/{name}/`.
+  static const List<String> itemRoots = [packagesDir, pluginsDir];
 
   /// Where replaced and removed items go when a change commits: the
   /// editor's trash, so they are restorable from the editor
@@ -46,9 +55,23 @@ final class StoreProject extends JustProject {
   /// The store's folder in [trashRoot].
   static const String trash = 'store';
 
-  /// Where an item [id] of [category] is installed.
-  static String packagePath(String category, String id) =>
-      '$packagesDir/$category/$id';
+  /// Where an item [id] of [kind] and [category] is installed: in
+  /// [pluginsDir] for an editor extension or a kit, in [packagesDir] for
+  /// content ([ItemKind.installFolder]).
+  ///
+  /// Throws [ArgumentError] for a kind the store never copies into the
+  /// project: pub.dev libraries and templates.
+  static String itemPath(ItemKind kind, String category, String id) {
+    final folder = kind.installFolder;
+    if (folder == null) {
+      throw ArgumentError.value(
+        kind,
+        'kind',
+        'A ${kind.id} item is not copied into the project',
+      );
+    }
+    return '$folder/$category/$id';
+  }
 
   /// The lockfile, or an empty one when the project has none yet.
   ///

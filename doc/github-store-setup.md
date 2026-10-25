@@ -2,7 +2,7 @@
 
 How the Just Asset Store's items are made and released, and how to run a catalog of your own on GitHub Pages.
 
-**The official catalog** is not a repository you edit. Its records are in Firestore, written only by the backend's GitHub Actions in the website's repository (`packages/just_asset_store_backend`), and it is served with the website from Firebase Hosting, at `https://store.justunknown.com/index.json` — the address `SourceConfig.official` reads. A package gets in by being submitted on the website once; its later releases are found by the backend's hourly refresh, from the `just_release.json` every release carries.
+**The official catalog** is not a repository you edit. Its records are in Firestore, written only by the backend's GitHub Actions in the website's repository (`packages/just_asset_store_backend`), and it is served with the website from Cloudflare Pages, at `https://store.justunknown.com/index.json` — the address `SourceConfig.official` reads. A package gets in by being submitted on the website once; its later releases are found by the backend's hourly refresh, from the `just_release.json` every release carries.
 
 Everything below assumes the GitHub organization **`just-unknown-dev`**. If you use another organization, or other names, change them in the places listed under [Names baked into the code](#names-baked-into-the-code).
 
@@ -28,11 +28,11 @@ a catalog of your own (optional)  templates/catalog: one pull request per new
 
 The flow for every version of every item is the same:
 
-1. Bump the version in the item's repository, push a tag, and its workflow makes a Release holding `<id>-<version>.zip`, `<id>-<version>.json` (the catalog's version file) and `just_release.json`.
+1. Bump the version in the item's repository, push a tag, and its workflow makes a Release holding `<id>-<version>.zip`, `<id>-<version>.json` (the catalog's version file) and `just_release.json` (with the publisher's claim code, from the repository variable `JUST_STORE_CLAIM`).
 2. The official catalog finds it by itself; a catalog of your own gets the version file in a pull request.
-3. Before it is listed, the archive is downloaded, compared with its pinned SHA-256, and put through the installer's own checks.
+3. Before it is listed, the archive is checked: first only its directory and two small files (read with HTTP ranges, against the SHA-256 GitHub records for it), then downloaded once, compared with that SHA-256, and put through the installer's own checks.
 
-A catalog never holds the archives, only their fingerprints. An archive that changes after it was listed is refused by every project. So **never re-upload or replace a Release asset**: publish a new version instead.
+A catalog never holds the archives, only their fingerprints. An archive that changes after it was listed is refused by every project. The official catalog lists only **immutable releases** (Settings → General → Releases → release immutability): once published, their files can't be replaced. For a catalog of your own, turn it on too, and never re-upload a Release asset: publish a new version instead.
 
 ---
 
@@ -184,13 +184,13 @@ items/my_sprite_tool/
 |---|---|
 | `id` | Equals the folder name and the package name. |
 | `kind` | `content`, `editor-extension`, `kit`, `runtime-library` or `template`. It must match the manifest. |
-| `category` | One of `catalog.json`'s category ids, and it must match the manifest. It is also the folder the item installs into: `packages/<category>/<id>/`. |
+| `category` | One of `catalog.json`'s category ids, and it must match the manifest. It is also the folder the item installs into: `packages/<category>/<id>/` for content, `plugins/<category>/<id>/` for an editor extension or a kit. |
 | `license.attribution` | Shown to everyone who installs the item. Use it whenever the licence asks for credit. |
 | `trust` | Don't write it. Trust comes from the publisher's file. |
 
 **Version files.** Use the release's `.json` as it is: it has the URL, `sha256` and size, plus `requires` and `dependencies` from the manifest, which must stay equal to the manifest's. Add these yourself when they apply:
 
-- `"nativePlugins": ["file_selector"]` when the package brings Flutter plugins with native code. The store warns about them before installing.
+- `"nativePlugins": ["file_selector"]` when the package brings Flutter plugins (or packages with build hooks). `just store pack` writes them when run after `pub get`, leaving out what the project has anyway through `requires` and the store items it needs; add any it couldn't see. The store warns about them before installing, and refuses them unless the package's `just_store.json` declares `"permissions": ["native"]`.
 - `"notes": "What changed"`, shown in the details pane.
 
 **A library from pub.dev** stays on pub.dev; the catalog only lists it, with no archive. Its `item.json` has `"kind": "runtime-library"` and `"pub": {"package": "<id>"}` (its id is its pub.dev name), and each version file is `{"version": "0.4.1", "constraint": "^0.4.1"}`: installing it adds that constraint to the project's dependencies.
@@ -237,22 +237,22 @@ In the template repository the first-party packages are **linked**: `just_store.
 A copy of the template that you share must work without the checkouts. Once the first-party items are in the official catalog, and the engine is on pub.dev, convert a fresh clone:
 
 1. Clone the template somewhere new. It has no `packages/` checkouts and no `pubspec_overrides.yaml`.
-2. In its `pubspec.yaml`, delete the hand-written entries for the store items (`just_game_engine_editor`, `just_sprite_editor`, `just_input_editor`, `just_ui_editor`, `just_platformer_kit`, `just_asset_store_editor`). The store writes its own entries for them.
+2. In its `pubspec.yaml`, delete the hand-written entries for the store items (`just_game_engine_editor`, `just_sprite_editor`, `just_input_editor`, `just_ui_editor`, `just_platformer_kit`). The Asset Store's window comes with the editor. The store writes its own entries for them.
 3. Delete `just_store.lock.json`: its entries point at checkouts this clone doesn't have.
 4. Install the first-party items:
 
    ```bash
-   for id in just_game_engine_editor just_asset_store_editor just_platformer_kit \
-             just_ui_editor just_sprite_editor just_input_editor; do
+   for id in just_game_engine_editor just_platformer_kit just_ui_editor \
+             just_sprite_editor just_input_editor; do
      just store install $id --project . -y
    done
    ```
 
-   Each install puts the package in `packages/<category>/<id>/`, adds it to the store's marked blocks in `pubspec.yaml`, records the archive's URL and fingerprint, and regenerates `lib/editor/store_modules.g.dart` and `lib/game/store_extensions.g.dart`.
-5. Check it: `just store list` shows the six items, and the editor opens with every tool.
+   These are all editor extensions and kits, so each install puts the package in `plugins/<category>/<id>/` (content goes in `packages/<category>/<id>/`), adds it to the store's marked blocks in `pubspec.yaml`, records the archive's URL and fingerprint, and regenerates `lib/editor/store_modules.g.dart` and `lib/game/store_extensions.g.dart`.
+5. Check it: `just store list` shows the five items, and the editor opens with every tool.
 6. Commit it, in one of two ways:
-   - **Commit `packages/`**, so a clone works offline at once.
-   - **Leave `packages/` out of git.** Each clone then runs `just store restore`, which downloads every item again, checked against the fingerprints in `just_store.lock.json`.
+   - **Commit `plugins/`** (and `packages/`, once it holds content), so a clone works offline at once.
+   - **Leave them out of git.** Each clone then runs `just store restore`, which downloads every item again, checked against the fingerprints in `just_store.lock.json`.
 
 ---
 

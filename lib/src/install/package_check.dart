@@ -8,7 +8,9 @@ import '../archive/zip_reader.dart';
 import '../catalog/item_manifest.dart';
 import '../catalog/json.dart';
 import '../catalog/store_index.dart';
-import '../project/pubspec_editor.dart';
+import 'pubspec_facts.dart';
+
+export 'pubspec_facts.dart';
 
 /// A package the store refuses to install, with every reason found.
 final class PackageCheckException implements Exception {
@@ -26,115 +28,57 @@ final class PackageCheckException implements Exception {
       '$item cannot be installed:\n${problems.map((p) => '- $p').join('\n')}';
 }
 
-/// What a package's `pubspec.yaml` says, read without a YAML library.
-final class PubspecFacts {
-  PubspecFacts._(
-    this.name,
-    this.version,
-    this.assets,
-    this.hasPlugin,
-    this.editor,
-  );
+/// What [PackageCheck.checkLayout] reads of a package: every file's path
+/// (at the package root: a folder wrapping the package is taken off),
+/// which are executable, and the two files the rules read. Where a file's
+/// bytes come from is up to the caller: an archive in memory, or an
+/// archive on a server read with HTTP ranges ([ZipDirectory]).
+final class PackageLayout {
+  /// A package of [paths], [executable] among them, whose `pubspec.yaml`
+  /// and `just_store.json` are [pubspec] and [manifest] (null: missing).
+  const PackageLayout({
+    required this.paths,
+    this.executable = const {},
+    this.pubspec,
+    this.manifest,
+  });
 
-  /// Reads [text]. Every line is read once, from left to right: a long
-  /// line costs its length, never its square.
-  factory PubspecFacts.parse(String text) {
-    final lines = const LineSplitter().convert(text);
+  /// Every file's path, at the package root.
+  final List<String> paths;
 
-    String? field(String key) {
-      for (final line in lines) {
-        if (!line.startsWith(key)) continue;
-        final rest = line.substring(key.length).trimLeft();
-        if (!rest.startsWith(':')) continue;
-        final v = _value(rest.substring(1));
-        if (v.isNotEmpty) return v;
-      }
-      return null;
-    }
+  /// The files marked executable.
+  final Set<String> executable;
 
-    final assets = <String>[];
-    var hasPlugin = false;
-    final flutterAt = lines.indexWhere(
-      (l) => RegExp(r'^flutter\s*:').hasMatch(l),
-    );
-    if (flutterAt >= 0) {
-      var end = flutterAt + 1;
-      while (end < lines.length &&
-          (lines[end].isEmpty ||
-              lines[end].startsWith(' ') ||
-              lines[end].startsWith('#'))) {
-        end++;
-      }
-      var inAssets = false;
-      var assetsIndent = 0;
-      for (var i = flutterAt + 1; i < end; i++) {
-        final line = lines[i];
-        if (line.trim().isEmpty || line.trimLeft().startsWith('#')) continue;
-        final indent = line.length - line.trimLeft().length;
-        final key = RegExp(r'^\s*([A-Za-z_-]+)\s*:').firstMatch(line);
-        if (inAssets && indent > assetsIndent) {
-          // `- folder/` or `- path: folder/`.
-          final item = line.trimLeft();
-          if (item.startsWith('-')) {
-            var rest = item.substring(1).trimLeft();
-            if (rest.startsWith('path')) {
-              final after = rest.substring('path'.length).trimLeft();
-              if (after.startsWith(':')) rest = after.substring(1);
-            }
-            final v = _value(rest);
-            if (v.isNotEmpty) assets.add(v);
-          }
-          continue;
-        }
-        inAssets = false;
-        if (key == null) continue;
-        if (key[1] == 'assets') {
-          inAssets = true;
-          assetsIndent = indent;
-        } else if (key[1] == 'plugin') {
-          hasPlugin = true;
-        }
-      }
-    }
-    return PubspecFacts._(
-      field('name'),
-      field('version'),
-      assets,
-      hasPlugin,
-      PubspecEditor.parse(text, marker: storeBlock),
-    );
-  }
+  /// The bytes of `pubspec.yaml`, when it has one.
+  final Uint8List? pubspec;
 
-  /// The package's name.
-  final String? name;
+  /// The bytes of `just_store.json`, when it has one.
+  final Uint8List? manifest;
+}
 
-  /// Its version, as written.
-  final String? version;
+/// Where the package is among an archive's [PackageCheck.metaEntries]: the
+/// folder wrapping it (`''` when none), and its two files the rules read.
+typedef PackageMeta = ({String prefix, ZipEntry? pubspec, ZipEntry? manifest});
 
-  /// Its `flutter: assets:` entries.
-  final List<String> assets;
+/// What [PackageCheck.checkLayout] found in a package that follows the
+/// rules.
+final class PackageFacts {
+  /// [manifest], with [notes] for the user and the [dependencies] its
+  /// pubspec names.
+  const PackageFacts(
+    this.manifest, {
+    this.notes = const [],
+    this.dependencies = const {},
+  });
 
-  /// Whether it declares a Flutter plugin (native code).
-  final bool hasPlugin;
+  /// Its `just_store.json`.
+  final ItemManifest manifest;
 
-  /// The pubspec, for reading its dependency sections.
-  final PubspecEditor editor;
+  /// Things worth telling the user that don't stop the install.
+  final List<String> notes;
 
-  /// Its `dependencies`.
-  Map<String, DependencySpec> get dependencies =>
-      editor.unmanaged('dependencies');
-
-  /// A scalar as written after its `:` or `-`: up to any `#`, trimmed, its
-  /// quotes taken off.
-  static String _value(String written) {
-    final hash = written.indexOf('#');
-    final v = (hash < 0 ? written : written.substring(0, hash)).trim();
-    return v.length >= 2 &&
-            ((v.startsWith("'") && v.endsWith("'")) ||
-                (v.startsWith('"') && v.endsWith('"')))
-        ? v.substring(1, v.length - 1)
-        : v;
-  }
+  /// The packages its `pubspec.yaml` depends on (SDKs aside).
+  final Set<String> dependencies;
 }
 
 /// A package that passed [PackageCheck.check]: its files and manifest.
@@ -191,6 +135,9 @@ abstract final class PackageCheck {
   /// The largest `pubspec.yaml` a package may have, in bytes.
   static const int maxPubspecBytes = 64 * 1024;
 
+  /// The largest `just_store.json` a package may have, in bytes.
+  static const int maxManifestBytes = 256 * 1024;
+
   /// Top-level folders a package may never hold: native code, build hooks
   /// that run on the user's machine, scripts.
   static const Set<String> forbiddenFolders = {
@@ -215,26 +162,154 @@ abstract final class PackageCheck {
     StoreItemVersion version, {
     bool matchDependencies = true,
   }) {
+    final (layout, top) = _layoutOf(zip);
+    // Every rule first: a package that breaks one is refused before
+    // anything else in it is unpacked.
+    final facts = checkLayout(
+      layout,
+      item,
+      version,
+      matchDependencies: matchDependencies,
+    );
+    return CheckedPackage(
+      facts.manifest,
+      {
+        for (final e in zip.files)
+          if (e.path.length > top.length) e.path.substring(top.length):
+              zip.contentOf(e),
+      },
+      notes: facts.notes,
+      executable: layout.executable,
+      dependencies: facts.dependencies,
+    );
+  }
+
+  /// What [check] finds, without keeping the files: every rule, then every
+  /// file unpacked and checked against its size and CRC-32, one at a time —
+  /// for a tool that vets archives too large to hold unpacked. Throws
+  /// [PackageCheckException] or [ZipFormatException].
+  static PackageFacts verify(
+    ZipArchive zip,
+    StoreItem item,
+    StoreItemVersion version, {
+    bool matchDependencies = true,
+  }) {
+    final (layout, _) = _layoutOf(zip);
+    final facts = checkLayout(
+      layout,
+      item,
+      version,
+      matchDependencies: matchDependencies,
+    );
+    for (final e in zip.files) {
+      zip.contentOf(e);
+    }
+    return facts;
+  }
+
+  /// [zip]'s layout, and the folder it wraps the package in (`''` when
+  /// none).
+  static (PackageLayout, String) _layoutOf(ZipArchive zip) =>
+      (layoutFromEntries(zip.files, zip.contentOf), metaEntries(zip.files).prefix);
+
+  /// The layout of the package among an archive's [files], [content]
+  /// giving the bytes of the two files the rules read. A file over its
+  /// limit ([maxPubspecBytes], [maxManifestBytes]) is never read: it is
+  /// passed on as that many bytes and one more, which the rules refuse.
+  static PackageLayout layoutFromEntries(
+    Iterable<ZipEntry> files,
+    Uint8List Function(ZipEntry entry) content,
+  ) {
+    final meta = metaEntries(files);
+    final top = meta.prefix;
+    Uint8List? small(ZipEntry? e, int max) => e == null
+        ? null
+        : e.size > max
+        ? Uint8List(max + 1)
+        : content(e);
+    return PackageLayout(
+      paths: [
+        for (final e in files)
+          if (e.path.length > top.length) e.path.substring(top.length),
+      ],
+      executable: {
+        for (final e in files)
+          if (e.isExecutable && e.path.length > top.length)
+            e.path.substring(top.length),
+      },
+      pubspec: small(meta.pubspec, maxPubspecBytes),
+      manifest: small(meta.manifest, maxManifestBytes),
+    );
+  }
+
+  /// The layout of the package in the archive [dir] describes — an archive
+  /// on a server, say — fetching through [read] (bytes `start` up to `end`)
+  /// only the two small files the rules read. With [checkLayout], the same
+  /// verdict as [check] gives once the archive is downloaded, before it is.
+  static Future<PackageLayout> layoutOf(
+    ZipDirectory dir,
+    Future<Uint8List> Function(int start, int end) read,
+  ) async {
+    final meta = metaEntries(dir.files);
+    final fetched = <ZipEntry, Uint8List>{};
+    for (final (entry, max) in [
+      (meta.pubspec, maxPubspecBytes),
+      (meta.manifest, maxManifestBytes),
+    ]) {
+      // A file whose packed data is far larger than it may unpack to is
+      // not worth fetching: the full check refuses it.
+      if (entry == null || entry.size > max) continue;
+      if (entry.compressedSize > max + 1024) {
+        throw ZipFormatException(
+          'Its packed data is far larger than the file.',
+          path: entry.path,
+        );
+      }
+      fetched[entry] = await dir.readContent(entry, read);
+    }
+    return layoutFromEntries(dir.files, (e) => fetched[e]!);
+  }
+
+  /// Where the package is among an archive's [files]: a single top-level
+  /// folder holding it (as GitHub's source archives have) is its prefix,
+  /// and the entries of its `pubspec.yaml` and `just_store.json`.
+  static PackageMeta metaEntries(Iterable<ZipEntry> files) {
+    final paths = [for (final e in files) e.path];
+    final prefix = _prefixOf(paths);
+    ZipEntry? at(String path) {
+      for (final e in files) {
+        if (e.path == path) return e;
+      }
+      return null;
+    }
+
+    return (
+      prefix: prefix,
+      pubspec: at('${prefix}pubspec.yaml'),
+      manifest: at('$prefix${ItemManifest.fileName}'),
+    );
+  }
+
+  /// The rules of [check], on what [layout] says of a package: every file's
+  /// path, and the two files the rules read. Throws [PackageCheckException]
+  /// listing every problem found.
+  static PackageFacts checkLayout(
+    PackageLayout layout,
+    StoreItem item,
+    StoreItemVersion version, {
+    bool matchDependencies = true,
+  }) {
     final problems = <String>[];
     final notes = <String>[];
-    final raw = <String, Uint8List>{
-      for (final e in zip.files) e.path: zip.contentOf(e),
-    };
-    var files = _unwrap(raw);
-    // The folder an archive wrapped the package in, when it did.
-    final top = identical(files, raw)
-        ? ''
-        : '${raw.keys.first.split('/').first}/';
-    final executable = {
-      for (final e in zip.files)
-        if (e.isExecutable &&
-            e.path.startsWith(top) &&
-            e.path.length > top.length)
-          e.path.substring(top.length),
-    };
-
-    final pubspecBytes = files['pubspec.yaml'];
-    final manifestBytes = files[ItemManifest.fileName];
+    final files = layout.paths.toSet();
+    final pubspecBytes = layout.pubspec;
+    final manifestBytes = layout.manifest;
+    if (manifestBytes != null && manifestBytes.length > maxManifestBytes) {
+      throw PackageCheckException(item.name, [
+        'Its ${ItemManifest.fileName} is larger than '
+            '${maxManifestBytes ~/ 1024} KiB.',
+      ]);
+    }
     if (pubspecBytes == null) problems.add('It has no pubspec.yaml.');
     if (manifestBytes == null) {
       problems.add('It has no ${ItemManifest.fileName}.');
@@ -308,7 +383,7 @@ abstract final class PackageCheck {
       pubspec = PubspecFacts.parse(text);
     } on FormatException {
       throw PackageCheckException(item.name, ['Its pubspec.yaml is not text.']);
-    } on PubspecEditException catch (e) {
+    } on PubspecFormatException catch (e) {
       throw PackageCheckException(item.name, [
         'Its pubspec.yaml: ${e.message}',
       ]);
@@ -321,35 +396,90 @@ abstract final class PackageCheck {
         'Its pubspec says version ${pubspec.version}, not ${version.version}.',
       );
     }
-    final Map<String, DependencySpec> deps;
-    try {
-      deps = pubspec.dependencies;
-    } on PubspecEditException catch (e) {
-      throw PackageCheckException(item.name, [
-        'Its pubspec.yaml: ${e.message}',
-      ]);
-    }
+    final deps = pubspec.dependencies;
     // What pub may fetch for it: versions from pub.dev, or an SDK. Anything
     // else — a path, git, another package server, or a form this check
     // does not know — would bring in code no catalog pinned.
     for (final e in deps.entries) {
       final spec = e.value;
-      final sdk = spec is OtherDependency && _isSdk(e.key, spec.text);
-      final fromPubDev =
-          spec is HostedDependency &&
-          (spec.url == null || _isPubDev(spec.url!));
-      if (!sdk && !fromPubDev) {
+      if (spec is OtherPubDependency) {
         problems.add(
-          'It depends on "${e.key}" by path, git or another package server. '
-          'Store packages depend on versions; the store points them at '
-          'installed copies.',
+          'It depends on "${e.key}" by ${spec.what}. Store packages depend '
+          'on versions from pub.dev or on an SDK, never by path, git or '
+          'another package server; the store points them at installed '
+          'copies.',
         );
       }
-      if (item.kind == ItemKind.content && !sdk) {
+      if (item.kind == ItemKind.content && spec is! SdkPubDependency) {
         problems.add(
           'A content item depends on nothing, but it needs "${e.key}".',
         );
       }
+    }
+    // The packages it brings from pub.dev are the ones the catalog shows
+    // (store items aside, which the manifest names).
+    if (matchDependencies && item.kind != ItemKind.content) {
+      final fromPub = {
+        for (final name in pubspec.hosted.keys)
+          if (!manifest.dependencies.containsKey(name)) name,
+      };
+      final listed = version.pubDependencies.keys.toSet();
+      final differ = [
+        ...fromPub.difference(listed),
+        ...listed.difference(fromPub),
+      ]..sort();
+      if (differ.isNotEmpty) {
+        problems.add(
+          'Its pubspec and the catalog disagree on the packages it needs '
+          'from pub.dev (${differ.join(', ')}). A store item it needs '
+          'belongs in its ${ItemManifest.fileName} dependencies, or pub '
+          'would look for another package of that name on pub.dev.',
+        );
+      }
+    }
+    // Every plugin says how finished it is: the store and the editor show
+    // it, and hide experimental and deprecated ones until asked.
+    if (item.kind.isPlugin && manifest.stage == null) {
+      problems.add(
+        'Its ${ItemManifest.fileName} names no "stage": "stable", "beta", '
+        '"experimental" or "deprecated".',
+      );
+    }
+    if (matchDependencies &&
+        (manifest.stage != version.stage ||
+            manifest.replacedBy != version.replacedBy)) {
+      String says(ItemStage? s, String? by) =>
+          '${s?.id ?? 'none'}${by == null ? '' : ', replaced by $by'}';
+      problems.add(
+        'Its manifest and the catalog disagree on its stage: '
+        '${says(manifest.stage, manifest.replacedBy)} against '
+        '${says(version.stage, version.replacedBy)}.',
+      );
+    }
+    if (matchDependencies) {
+      final listed = version.permissions;
+      final declared = manifest.permissions;
+      if (listed.length != declared.length || !listed.containsAll(declared)) {
+        String names(Set<ItemPermission> s) =>
+            s.isEmpty ? 'nothing' : [for (final p in s) p.id].join(', ');
+        problems.add(
+          'Its manifest and the catalog disagree on what it may do: '
+          '${names(declared)} against ${names(listed)}. The store shows '
+          'users what the catalog says.',
+        );
+      }
+    }
+    final native = [
+      ...version.nativePlugins,
+      if (pubspec.hasPlugin) item.id,
+    ];
+    if (native.isNotEmpty &&
+        !manifest.permissions.contains(ItemPermission.native)) {
+      problems.add(
+        'It brings native code (${native.join(', ')}), but its '
+        '${ItemManifest.fileName} does not list "native" in its '
+        'permissions.',
+      );
     }
     if (pubspec.hasPlugin) {
       if (item.kind == ItemKind.content) {
@@ -364,7 +494,7 @@ abstract final class PackageCheck {
 
     // Every file: a safe kind, in a place allowed for it.
     final allowed = {...contentExtensions, if (item.kind.isCode) 'dart'};
-    for (final path in files.keys) {
+    for (final path in files) {
       final parts = path.split('/');
       final name = parts.last;
       // Windows and macOS find `Hook/` when the toolchain asks for `hook/`:
@@ -423,7 +553,7 @@ abstract final class PackageCheck {
       for (final x in manifest.extensions) x.library,
     ]) {
       final file = 'lib/${library.substring(ownPrefix.length)}';
-      if (!files.containsKey(file)) {
+      if (!files.contains(file)) {
         problems.add('Its manifest registers $library, but it has no $file.');
       }
     }
@@ -431,23 +561,19 @@ abstract final class PackageCheck {
       _checkContent(manifest, pubspec, files, problems);
     }
     for (final preview in manifest.previews) {
-      if (!files.containsKey(preview)) {
+      if (!files.contains(preview)) {
         problems.add('The preview "$preview" is missing.');
       }
     }
     if (problems.isNotEmpty) {
       throw PackageCheckException(item.name, problems);
     }
-    return CheckedPackage(
+    return PackageFacts(
       manifest,
-      files,
       notes: notes,
-      executable: executable,
       dependencies: {
         for (final e in deps.entries)
-          if (!(e.value is OtherDependency &&
-              _isSdk(e.key, (e.value as OtherDependency).text)))
-            e.key,
+          if (e.value is! SdkPubDependency) e.key,
       },
     );
   }
@@ -458,7 +584,7 @@ abstract final class PackageCheck {
   static void _checkContent(
     ItemManifest manifest,
     PubspecFacts pubspec,
-    Map<String, Uint8List> files,
+    Set<String> files,
     List<String> problems,
   ) {
     final listed = pubspec.assets.toSet();
@@ -471,7 +597,7 @@ abstract final class PackageCheck {
     }
     final meta = {'pubspec.yaml', ItemManifest.fileName, ...manifest.previews};
     final used = <String>{};
-    for (final path in files.keys) {
+    for (final path in files) {
       if (meta.contains(path) || !path.contains('/')) continue;
       final folder = path.substring(0, path.lastIndexOf('/') + 1);
       if (declared.contains(folder)) {
@@ -488,41 +614,13 @@ abstract final class PackageCheck {
     }
   }
 
-  /// Whether [text], the pubspec entry for the dependency [name], says only
-  /// `sdk: <sdk>` (`flutter: {sdk: flutter}`, or as a block), comments
-  /// aside.
-  static bool _isSdk(String name, String text) {
-    final body = text
-        .split('\n')
-        .map((l) => l.replaceFirst(RegExp(r'(^|\s)#.*$'), ''))
-        .join(' ')
-        .trim();
-    final prefix = RegExp('^${RegExp.escape(name)}[ \t]*:').firstMatch(body);
-    if (prefix == null) return false;
-    return RegExp(
-      r'^(?:\{[ \t]*sdk[ \t]*:[ \t]*[A-Za-z_]+[ \t]*\}|sdk[ \t]*:[ \t]*[A-Za-z_]+)$',
-    ).hasMatch(body.substring(prefix.end).trim());
-  }
-
-  /// Whether [url], a dependency's `hosted:` server, is pub.dev.
-  static bool _isPubDev(String url) {
-    final uri = Uri.tryParse(url.trim());
-    return uri != null &&
-        uri.scheme == 'https' &&
-        (uri.host == 'pub.dev' || uri.host == 'pub.dartlang.org') &&
-        !uri.hasPort &&
-        uri.pathSegments.every((s) => s.isEmpty);
-  }
-
-  static Map<String, Uint8List> _unwrap(Map<String, Uint8List> files) {
-    if (files.containsKey('pubspec.yaml') || files.isEmpty) return files;
-    final firsts = files.keys.map((p) => p.split('/').first).toSet();
-    if (firsts.length != 1) return files;
+  /// The folder (`top/`) that wraps the package among [paths], or `''`
+  /// when the package is at the archive's root.
+  static String _prefixOf(List<String> paths) {
+    if (paths.contains('pubspec.yaml') || paths.isEmpty) return '';
+    final firsts = paths.map((p) => p.split('/').first).toSet();
+    if (firsts.length != 1) return '';
     final top = '${firsts.single}/';
-    if (!files.containsKey('${top}pubspec.yaml')) return files;
-    return {
-      for (final e in files.entries)
-        if (e.key.length > top.length) e.key.substring(top.length): e.value,
-    };
+    return paths.contains('${top}pubspec.yaml') ? top : '';
   }
 }

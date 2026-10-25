@@ -11,7 +11,7 @@ import 'package:test/test.dart';
 String fixture(String name) => File('test/fixtures/$name').readAsStringSync();
 
 const knight = PathDependency('packages/characters/just_art_knight');
-const sprites = PathDependency('packages/editors/just_sprite_editor');
+const sprites = PathDependency('plugins/editors/just_sprite_editor');
 
 void main() {
   // A copy of the template's own files: pubspec.yaml has CRLF endings and

@@ -2,7 +2,7 @@
 
 The core of the Just Asset Store. It reads store catalogs, downloads and checks items, and installs them into a Just Game Engine project (one with `just_game_engine` and `just_game_engine_editor`) as packages. It is pure Dart, with no Flutter, and builds on [`just_core_cli`](https://pub.dev/packages/just_core_cli).
 
-The editor's store window is `just_asset_store_editor`. It uses this package, as do `just store …` and a catalog's CI. All three run the same checks, so an item that passes the catalog's CI installs in the editor.
+The editor's store window is part of `just_game_engine_editor` (from 0.1.0-dev.2). It uses this package, as do `just store …` and a catalog's CI. All three run the same checks, so an item that passes the catalog's CI installs in the editor.
 
 ## Install
 
@@ -24,8 +24,8 @@ flutter pub add --dev just_asset_store
 | Kind | Installs as |
 |---|---|
 | `content`: art, sound, tilesets… | An asset-only package in `packages/{category}/{id}/`. Its assets are `packages/<id>/...`: the same key in the editor and the game, never rewritten. |
-| `editor-extension` | A package under `dev_dependencies`, so release builds leave out its native plugins. Its modules go into the generated `lib/editor/store_modules.g.dart`. |
-| `kit`: game code plus an editor part | A regular dependency. Its modules are registered as above, and its runtime `ContextExtension`s go into `lib/game/store_extensions.g.dart`. |
+| `editor-extension` | A plugin in `plugins/{category}/{id}/`, under `dev_dependencies`, so release builds leave out its native plugins. Its modules go into the generated `lib/editor/store_modules.g.dart`. |
+| `kit`: game code plus an editor part | A plugin in `plugins/{category}/{id}/`, as a regular dependency. Its modules are registered as above, and its runtime `ContextExtension`s go into `lib/game/store_extensions.g.dart`. |
 | `runtime-library` | A hosted pub.dev dependency. Nothing is copied. |
 | `template`: a whole project to start from | Never installed. `just store template <id>` (or `just create <folder> --template <id>`) lays its `template/` folder over a project and installs what it needs. |
 

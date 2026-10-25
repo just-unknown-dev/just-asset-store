@@ -11,10 +11,12 @@ import 'test_items.dart';
 export 'test_items.dart';
 
 /// Writes a folder catalog of [items] into [dir]; returns its source.
+/// [split] publishes it as the store does: `index.json` naming pieces.
 FolderStoreSource buildCatalog(
   Directory dir,
   List<TestItem> items, {
   String sourceId = 'test',
+  bool split = false,
 }) {
   final out = <Map<String, Object?>>[];
   for (final item in items) {
@@ -49,6 +51,9 @@ FolderStoreSource buildCatalog(
         'requires': item.requires,
         'pubDependencies': item.pubDependencies,
         'nativePlugins': item.nativePlugins,
+        'permissions': item.permissions,
+        'stage': ?item.stage,
+        'replacedBy': ?item.replacedBy,
       });
     }
     out.add({
@@ -64,16 +69,24 @@ FolderStoreSource buildCatalog(
     });
   }
   final categories = {for (final i in items) i.category}.toList()..sort();
-  File('${dir.path}/index.json').writeAsStringSync(
-    jsonEncode({
-      'schema': 1,
-      'source': {'id': sourceId, 'name': 'Test catalog'},
-      'categories': [
-        for (final c in categories) {'id': c, 'label': titleOf(c)},
-      ],
-      'items': out,
-    }),
-  );
+  final index = {
+    'schema': 1,
+    'source': {'id': sourceId, 'name': 'Test catalog'},
+    'categories': [
+      for (final c in categories) {'id': c, 'label': titleOf(c)},
+    ],
+    'items': out,
+  };
+  if (split) {
+    final files = CatalogFiles.of(StoreIndex.parse(jsonEncode(index)));
+    files.files.forEach((path, bytes) {
+      File('${dir.path}/$path')
+        ..parent.createSync(recursive: true)
+        ..writeAsBytesSync(bytes);
+    });
+  } else {
+    File('${dir.path}/index.json').writeAsStringSync(jsonEncode(index));
+  }
   return FolderStoreSource(dir.path);
 }
 

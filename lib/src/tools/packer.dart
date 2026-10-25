@@ -9,11 +9,12 @@ import '../archive/zip_reader.dart';
 import '../archive/zip_writer.dart';
 import '../catalog/item_manifest.dart';
 import '../catalog/json.dart';
+import '../catalog/semver.dart';
 import '../catalog/store_index.dart';
 import '../crypto/sha256.dart';
 import '../install/package_check.dart';
-import '../project/pubspec_editor.dart';
 import '../project/store_project.dart';
+import 'native_scan.dart';
 
 /// A packed archive and what the catalog needs to know about it.
 final class PackResult {
@@ -23,6 +24,8 @@ final class PackResult {
     required this.manifest,
     required this.files,
     required this.unpackedSize,
+    this.pubDependencies = const {},
+    this.nativePlugins = const [],
     this.warnings = const [],
   });
 
@@ -37,6 +40,15 @@ final class PackResult {
 
   /// Their total size, in bytes.
   final int unpackedSize;
+
+  /// The packages its pubspec brings from pub.dev (store items aside), with
+  /// their constraints: what the catalog shows, and what the installer
+  /// checks the pubspec against.
+  final Map<String, String> pubDependencies;
+
+  /// The packages with native code it brings, as its resolved dependencies
+  /// say ([NativeScan]).
+  final List<String> nativePlugins;
 
   /// Things that look wrong but don't stop it installing.
   final List<String> warnings;
@@ -66,6 +78,14 @@ final class PackResult {
         'dependencies': {
           for (final e in manifest.dependencies.entries) e.key: '${e.value}',
         },
+        'pubDependencies': pubDependencies,
+        'nativePlugins': nativePlugins,
+        'permissions': [
+          for (final p in ItemPermission.values)
+            if (manifest.permissions.contains(p)) p.id,
+        ],
+        'stage': manifest.stage?.id,
+        'replacedBy': manifest.replacedBy,
       });
 }
 
@@ -87,7 +107,14 @@ abstract final class Packer {
   ///
   /// [excluding] is a folder inside [folder] (relative to it, with `/`)
   /// to leave out: where the archive is written, when that is inside.
-  static PackResult pack(Directory folder, {String? excluding}) {
+  ///
+  /// It is checked as a community item unless [trust] says otherwise: the
+  /// rules the store applies to everyone else's.
+  static PackResult pack(
+    Directory folder, {
+    String? excluding,
+    TrustLevel trust = TrustLevel.community,
+  }) {
     final project = StoreProject(folder.path);
     final manifestFile = project.file(ItemManifest.fileName);
     if (!manifestFile.existsSync()) {
@@ -134,6 +161,40 @@ abstract final class Packer {
           zip.add(path, bytes, executable: executable.contains(path)),
     );
     final bytes = zip.close();
+    // What it brings from pub.dev, as pub reads its pubspec (an unreadable
+    // pubspec is the check's to report).
+    var fromPub = <String, String>{};
+    try {
+      final facts = PubspecFacts.parse(utf8.decode(files['pubspec.yaml'] ?? []));
+      if (manifest.kind != ItemKind.content) {
+        fromPub = {
+          for (final e in facts.hosted.entries)
+            if (!manifest.dependencies.containsKey(e.key))
+              e.key: '${e.value ?? VersionConstraint.any}',
+        };
+      }
+    } on Object {
+      // Refused below.
+    }
+    // The native code those bring, as the folder's resolution says: the
+    // store shows it, and the package must declare it.
+    final warnings = <String>[];
+    var native = <String>[];
+    if (fromPub.isNotEmpty) {
+      final scanned = NativeScan.of(
+        folder.path,
+        manifest.id,
+        provided: {...manifest.dependencies.keys, ...manifest.requires.keys},
+      );
+      if (scanned == null) {
+        warnings.add(
+          'Run pub get in it first: the store lists the native plugins its '
+          'packages from pub.dev bring, and could not look.',
+        );
+      } else {
+        native = scanned;
+      }
+    }
     final item = StoreItem(
       id: manifest.id,
       name: manifest.name,
@@ -143,8 +204,17 @@ abstract final class Packer {
         StoreItemVersion(
           version: manifest.version,
           dependencies: manifest.dependencies,
+          pubDependencies: {
+            for (final e in fromPub.entries)
+              e.key: VersionConstraint.parse(e.value),
+          },
+          nativePlugins: native,
+          permissions: manifest.permissions,
+          stage: manifest.stage,
+          replacedBy: manifest.replacedBy,
         ),
       ],
+      trust: trust,
     );
     PackageCheck.check(ZipArchive.read(bytes), item, item.versions.single);
 
@@ -153,18 +223,23 @@ abstract final class Packer {
       manifest: manifest,
       files: files.length,
       unpackedSize: files.values.fold(0, (s, f) => s + f.length),
-      warnings: _lint(manifest, files),
+      pubDependencies: fromPub,
+      nativePlugins: native,
+      warnings: [...warnings, ..._lint(manifest, files)],
     );
   }
 
-  /// Paths that work in the author's project but break once installed.
+  /// Paths that work in the author's project but break once installed, and
+  /// what the store would show half empty.
   static List<String> _lint(ItemManifest m, Map<String, Uint8List> files) {
-    final out = <String>[];
-    final pubspec = PubspecEditor.parse(
+    final out = <String>[
+      if (m.summary.isEmpty)
+        'Its ${ItemManifest.fileName} has no "summary": the store shows one '
+            'line about it on its card.',
+    ];
+    final pubDeps = PubspecFacts.parse(
       utf8.decode(files['pubspec.yaml']!),
-      marker: storeBlock,
-    );
-    final pubDeps = pubspec.unmanaged('dependencies').keys.toSet();
+    ).dependencies.keys.toSet();
     for (final dep in m.dependencies.keys) {
       if (!pubDeps.contains(dep)) {
         out.add(

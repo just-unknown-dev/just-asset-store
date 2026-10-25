@@ -314,7 +314,12 @@ final class StoreInstaller {
                 f.key: FileHashes.of(f.key, f.value),
             },
             entitlement: c.current?.entitlement,
-            system: c.current?.system ?? package.manifest.system,
+            // Only the store's own team may mark an item part of the
+            // editor: a community one claiming it could never be removed.
+            system:
+                c.entry!.item.isOfficial &&
+                (c.current?.system ?? package.manifest.system),
+            official: c.entry!.item.isOfficial,
           ),
         );
       }

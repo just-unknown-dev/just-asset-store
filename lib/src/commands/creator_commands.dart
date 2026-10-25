@@ -7,6 +7,8 @@ import 'dart:io';
 
 import 'package:just_core_cli/just_core_cli.dart';
 
+import '../catalog/catalog_files.dart';
+import '../catalog/claim.dart';
 import '../catalog/item_manifest.dart';
 import '../catalog/json.dart';
 import '../catalog/store_index.dart';
@@ -43,6 +45,14 @@ final class PackCommand extends JustCommand {
         help:
             'The GitHub release tag the archive goes to (default: '
             'v<version>), named in just_release.json.',
+      )
+      ..addOption(
+        'claim',
+        valueHelp: 'code',
+        help:
+            'Your claim code from the store\'s website (jas1-…), written '
+            'into just_release.json: it says your store account may publish '
+            'this package.',
       );
   }
 
@@ -65,6 +75,13 @@ final class PackCommand extends JustCommand {
     final outDir = Directory(
       absoluteIn(argResults!.option('out')!, context.workingDirectory),
     );
+    final claim = argResults!.option('claim')?.trim();
+    if (claim != null && !isClaimCode(claim)) {
+      throw UsageFailure(
+        '"$claim" is not a claim code. Copy yours from the store\'s Publish '
+        'page: it looks like jas1-abcdefghijklmnop.',
+      );
+    }
     // An output folder inside the package (`-o dist`) holds earlier
     // archives: never packed into the next one.
     final result = _pack(
@@ -97,8 +114,17 @@ final class PackCommand extends JustCommand {
             result.fileName,
             published: DateTime.now(),
           ),
+          claim: claim,
         ).toText(),
       );
+    // Its pictures go up beside the archive, where the store finds them by
+    // file name (the manifest keeps the names apart).
+    final pictures = [
+      for (final path in result.manifest.previews)
+        File('${folder.path}/$path').copySync(
+          '${outDir.path}/${path.split('/').last}',
+        ),
+    ];
     output
       ..line('Packed ${result.manifest.name} ${result.manifest.version}:')
       ..line('  ${zip.path}')
@@ -109,8 +135,17 @@ final class PackCommand extends JustCommand {
       ..line('  sha256 ${result.sha256}')
       ..line('  catalog version file: ${versionFile.path}')
       ..line('  release file ($tag): ${releaseFile.path}');
+    for (final picture in pictures) {
+      output.line('  picture: ${picture.path}');
+    }
     if (base == null) {
       output.line('  (Its URL is a placeholder: pass --url, or edit it.)');
+    }
+    if (claim == null) {
+      output.warn(
+        'No claim code (--claim): the store lists a release only when its '
+        "just_release.json carries its publisher's code.",
+      );
     }
     for (final w in result.warnings) {
       output.warn(w);
@@ -126,6 +161,7 @@ final class PackCommand extends JustCommand {
       'size': result.bytes.length,
       'files': result.files,
       'url': url,
+      'pictures': [for (final p in pictures) p.path],
     };
     return 0;
   }
@@ -183,17 +219,34 @@ final class ValidateCommand extends JustCommand {
     final manifest = ItemManifest.parse(
       utf8.decode(zip.contentOf(manifestEntry)),
     );
+    // The catalog's side: the version file `just store pack` wrote beside
+    // the archive when it is there, else what the manifest itself says.
+    final versionFile = File(
+      '${path.substring(0, path.length - '.zip'.length)}.json',
+    );
+    final StoreItemVersion version;
+    if (path.toLowerCase().endsWith('.zip') && versionFile.existsSync()) {
+      version = StoreItemVersion.fromJson(
+        JsonFields.parse(versionFile.readAsStringSync()),
+        manifest.kind,
+      );
+      output.info('Checked against ${versionFile.path}.');
+    } else {
+      version = StoreItemVersion(
+        version: manifest.version,
+        requires: manifest.requires,
+        dependencies: manifest.dependencies,
+        permissions: manifest.permissions,
+        stage: manifest.stage,
+        replacedBy: manifest.replacedBy,
+      );
+    }
     final item = StoreItem(
       id: manifest.id,
       name: manifest.name,
       kind: manifest.kind,
       category: manifest.category,
-      versions: [
-        StoreItemVersion(
-          version: manifest.version,
-          dependencies: manifest.dependencies,
-        ),
-      ],
+      versions: [version],
     );
     final CheckedPackage checked;
     try {
@@ -294,9 +347,15 @@ final class IndexCommand extends JustCommand {
           final out = Directory(
             absoluteIn(argResults!.option('out')!, context.workingDirectory),
           )..createSync(recursive: true);
-          File(
-            '${out.path}/index.json',
-          ).writeAsStringSync(canonicalJson(build.index.toJson()));
+          // index.json and its pieces. Pieces an earlier build wrote stay:
+          // an editor that read the old index.json a moment ago still finds
+          // them.
+          final files = CatalogFiles.of(build.index);
+          files.files.forEach((published, bytes) {
+            File('${out.path}/$published')
+              ..parent.createSync(recursive: true)
+              ..writeAsBytesSync(bytes);
+          });
           build.assets.forEach((published, file) {
             File('${out.path}/$published')
               ..parent.createSync(recursive: true)
@@ -305,11 +364,12 @@ final class IndexCommand extends JustCommand {
           output
             ..result = {
               'items': build.index.items.length,
+              'pieces': files.pieces.length,
               'index': '${out.path}/index.json',
             }
             ..line(
               'Built ${build.index.items.length} items into '
-              '${out.path}/index.json.',
+              '${out.path}/index.json and ${files.pieces.length} pieces.',
             );
           return 0;
         case 'check':

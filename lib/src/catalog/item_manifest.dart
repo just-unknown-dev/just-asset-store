@@ -86,6 +86,13 @@ final class ItemManifest {
     required this.version,
     required this.kind,
     required this.category,
+    this.summary = '',
+    this.description,
+    this.tags = const [],
+    this.author,
+    this.permissions = const {},
+    this.stage,
+    this.replacedBy,
     this.license,
     this.requires = const {},
     this.dependencies = const {},
@@ -201,6 +208,40 @@ final class ItemManifest {
         'An editor extension has no runtime part; make it a kit.',
       );
     }
+    final permissions = <ItemPermission>{};
+    final permissionNames = json.strings('permissions');
+    for (var i = 0; i < permissionNames.length; i++) {
+      final p = ItemPermission.byId[permissionNames[i]];
+      if (p == null) {
+        throw StoreFormatException(
+          'Expected one of: ${ItemPermission.byId.keys.join(', ')}.',
+          where: '${json.where.isEmpty ? '' : '${json.where}.'}permissions[$i]',
+        );
+      }
+      permissions.add(p);
+    }
+    final stage = ItemStage.optFrom(json, 'stage');
+    final replacedBy = json.optString('replacedBy');
+    if (replacedBy != null) {
+      if (!StoreNames.isId(replacedBy) || replacedBy == id) {
+        throw json.error(
+          'replacedBy',
+          'Name the id of the item that replaces this one.',
+        );
+      }
+      if (stage != ItemStage.deprecated) {
+        throw json.error(
+          'replacedBy',
+          'Only a deprecated item is replaced: set "stage" to "deprecated".',
+        );
+      }
+    }
+    if (kind == ItemKind.content && permissions.isNotEmpty) {
+      throw json.error('permissions', 'A content item holds no code.');
+    }
+    final previews = json.strings('previews');
+    _checkPreviews(json, previews);
+    final author = json.optObject('author');
 
     return ItemManifest(
       id: id,
@@ -208,6 +249,18 @@ final class ItemManifest {
       version: json.version('version'),
       kind: kind,
       category: category,
+      summary: optPlainText(json, 'summary', json.optString('summary')) ?? '',
+      description: optPlainText(
+        json,
+        'description',
+        json.optString('description'),
+        lines: true,
+      ),
+      tags: [for (final t in json.strings('tags')) plainText(json, 'tags', t)],
+      author: author == null ? null : StoreAuthor.fromJson(author),
+      permissions: permissions,
+      stage: stage,
+      replacedBy: replacedBy,
       license: license == null ? null : StoreLicense.fromJson(license),
       requires: json.constraints('requires'),
       dependencies: json.constraints('dependencies'),
@@ -226,7 +279,7 @@ final class ItemManifest {
             ),
       assetFolders: folders,
       entryPoints: entryPoints,
-      previews: json.strings('previews'),
+      previews: previews,
       system: json.flag('system'),
     );
   }
@@ -247,8 +300,31 @@ final class ItemManifest {
   /// What it is.
   final ItemKind kind;
 
-  /// Its store category: it lives in `packages/{category}/{id}/`.
+  /// Its store category: it lives in `packages/{category}/{id}/` (content)
+  /// or `plugins/{category}/{id}/` (an editor extension or a kit).
   final String category;
+
+  /// One line for its card in the store.
+  final String summary;
+
+  /// A longer description, plain text.
+  final String? description;
+
+  /// Search words.
+  final List<String> tags;
+
+  /// Who made it.
+  final StoreAuthor? author;
+
+  /// What its code does that a user should know before installing it.
+  final Set<ItemPermission> permissions;
+
+  /// How finished this version is. Every plugin (editor tool or kit) names
+  /// one; the store and the editor show it.
+  final ItemStage? stage;
+
+  /// For a deprecated item: the item that replaces it.
+  final String? replacedBy;
 
   /// Its licence.
   final StoreLicense? license;
@@ -287,8 +363,16 @@ final class ItemManifest {
   /// A content item's main files.
   final List<EntryPoint> entryPoints;
 
-  /// Images for its details pane, inside the package.
+  /// Pictures for its store page, inside the package; the first is its card
+  /// picture. `just store pack` copies them beside the archive, and they go
+  /// up with it as release files.
   final List<String> previews;
+
+  /// The most pictures one item shows.
+  static const int maxPreviews = 8;
+
+  /// The picture types the store reads, by file extension.
+  static const Set<String> previewTypes = {'png', 'jpg', 'jpeg', 'webp'};
 
   /// Part of the editor itself: shown, updated, never uninstalled.
   final bool system;
@@ -305,6 +389,14 @@ final class ItemManifest {
     'version': '$version',
     'kind': kind.id,
     'category': category,
+    'summary': summary.isEmpty ? null : summary,
+    'description': description,
+    'tags': tags,
+    'author': author?.toJson(),
+    'permissions': [
+      for (final p in ItemPermission.values)
+        if (permissions.contains(p)) p.id,
+    ],
     'license': license?.toJson(),
     'requires': {for (final e in requires.entries) e.key: '${e.value}'},
     'dependencies': {for (final e in dependencies.entries) e.key: '${e.value}'},
@@ -323,6 +415,8 @@ final class ItemManifest {
     }),
     'previews': previews,
     'system': system ? true : null,
+    'stage': stage?.id,
+    'replacedBy': replacedBy,
   });
 }
 
@@ -353,6 +447,49 @@ String _identifier(JsonFields json, String key) {
     throw json.error(key, '"$text" is not a Dart name.');
   }
   return text;
+}
+
+/// Pictures go up as release files beside the archive, found by file name:
+/// each must be an image inside the package, and no two may share a name.
+void _checkPreviews(JsonFields json, List<String> previews) {
+  if (previews.length > ItemManifest.maxPreviews) {
+    throw json.error(
+      'previews',
+      'At most ${ItemManifest.maxPreviews} pictures; this names '
+          '${previews.length}.',
+    );
+  }
+  final names = <String>{};
+  for (final path in previews) {
+    if (!SafePaths.isSafe(path) || path.endsWith('/')) {
+      throw json.error('previews', '"$path" is not a file inside the package.');
+    }
+    final name = path.split('/').last;
+    // GitHub renames release files with other characters on upload.
+    if (!RegExp(r'^[A-Za-z0-9_+-][A-Za-z0-9._+-]*$').hasMatch(name)) {
+      throw json.error(
+        'previews',
+        '"$name" must be a plain file name: letters, digits, ".", "_", "+" '
+            'and "-".',
+      );
+    }
+    final dot = name.lastIndexOf('.');
+    final extension = dot < 0 ? '' : name.substring(dot + 1).toLowerCase();
+    if (!ItemManifest.previewTypes.contains(extension)) {
+      throw json.error(
+        'previews',
+        '"$path" is not a picture: use '
+            '${ItemManifest.previewTypes.map((t) => '.$t').join(', ')}.',
+      );
+    }
+    if (!names.add(name.toLowerCase())) {
+      throw json.error(
+        'previews',
+        'Two pictures are called "$name": they become release files, found '
+            'by name, so each needs its own.',
+      );
+    }
+  }
 }
 
 String _safePath(JsonFields json, String key) {

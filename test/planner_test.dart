@@ -47,7 +47,7 @@ LockedItem locked(
   kind: ItemKind.kit,
   origin: ItemOrigin.vendored,
   category: category,
-  path: 'packages/$category/$id',
+  path: 'plugins/$category/$id',
   direct: direct,
   system: system,
 );
@@ -76,6 +76,7 @@ void main() {
     );
     expect(plan.changes.first.reason, 'Needed by Just Kit');
     expect(plan.changes.first.path, 'packages/characters/just_art_knight');
+    expect(plan.changes.last.path, 'plugins/kits/just_kit');
     expect(plan.needsRestart, isTrue, reason: 'a kit is code');
     expect(plan.downloadBytes, greaterThan(0));
   });
@@ -189,6 +190,64 @@ void main() {
     },
   );
 
+  test('a folder of the item in either root, in any letter case', () async {
+    final catalog = await catalogOf([
+      TestItem('just_art_knight'),
+      TestItem('just_kit', kind: ItemKind.kit, category: 'kits'),
+      TestItem(
+        'just_tool',
+        kind: ItemKind.editorExtension,
+        category: 'editors',
+      ),
+    ]);
+    InstallPlan plan(String id, Set<String> folders) => Planner(
+      catalog,
+      ProjectState(lock: StoreLock(), existingFolders: folders),
+    ).install(id);
+
+    // Its own folder.
+    expect(
+      blockers(plan('just_kit', {'plugins/kits/just_kit'})).single,
+      'plugins/kits/just_kit already exists, and the store did not put it '
+      'there. Move it away first.',
+    );
+    // The same folder in the other root would be a second copy.
+    expect(
+      blockers(plan('just_kit', {'packages/kits/just_kit'})).single,
+      'packages/kits/just_kit already exists, and the store did not put it '
+      'there. Just Kit goes in plugins/kits/just_kit, so the project would '
+      'have two copies of it. Move it away first.',
+    );
+    expect(
+      blockers(
+        plan('just_art_knight', {'plugins/characters/just_art_knight'}),
+      ).single,
+      contains('Just Art Knight goes in packages/characters/just_art_knight'),
+    );
+    expect(
+      blockers(plan('just_tool', {'packages/editors/just_tool'})).single,
+      contains('goes in plugins/editors/just_tool'),
+    );
+    // Another category or another name is no clash.
+    expect(
+      plan('just_kit', {
+        'plugins/tools/just_kit',
+        'plugins/kits/just_kit_extra',
+        'packages/kits/other',
+      }).blockers,
+      isEmpty,
+    );
+    // Another letter case is, where the file system ignores case.
+    final caseless = Platform.isWindows || Platform.isMacOS;
+    for (final folder in ['Plugins/Kits/Just_Kit', 'PACKAGES/kits/just_kit']) {
+      expect(
+        blockers(plan('just_kit', {folder})).toList(),
+        caseless ? [startsWith('$folder already exists')] : isEmpty,
+        reason: folder,
+      );
+    }
+  });
+
   test('paid items, community code and native plugins', () async {
     final catalog = await catalogOf([
       TestItem('just_art_paid', access: 'entitled'),
@@ -207,7 +266,10 @@ void main() {
         attribution: 'Art by T.',
       ),
     ]);
-    final planner = Planner(catalog, ProjectState(lock: StoreLock()));
+    final planner = Planner(
+      catalog,
+      ProjectState(lock: StoreLock(), graph: const PackageGraph(['game'], {})),
+    );
     expect(blockers(planner.install('just_art_paid')).single, contains('paid'));
     final tool = planner.install('their_tool');
     expect(tool.canApply, isTrue);
@@ -224,12 +286,268 @@ void main() {
       messages,
       contains('warning: Their Tool is code from Tester (community)'),
     );
+    expect(
+      messages,
+      isNot(contains('Brings native code')),
+      reason: 'the native plugins have their own note',
+    );
     final kitPlan = planner.install('their_kit');
     expect(
       kitPlan.issues.map((i) => i.message).join('\n'),
       allOf(contains('build into every version'), contains('Art by T.')),
     );
   });
+
+  test('what an item declares it does is shown before it installs',
+      () async {
+    final catalog = await catalogOf([
+      TestItem(
+        'their_tool',
+        kind: ItemKind.editorExtension,
+        category: 'editors',
+        trust: 'community',
+        permissions: ['processes', 'network'],
+      ),
+    ]);
+    final plan = Planner(
+      catalog,
+      ProjectState(lock: StoreLock(), graph: const PackageGraph(['game'], {})),
+    ).install('their_tool');
+    expect(
+      plan.issues.map((i) => '${i.level.name}: ${i.message}'),
+      contains(
+        'warning: Their Tool connects to the internet and runs other '
+        'programs, as it declares.',
+      ),
+    );
+    expect(
+      ItemPermission.describe(ItemPermission.values.toSet()),
+      'connects to the internet, reads or writes files outside the '
+      'project, runs other programs and brings native code (Flutter '
+      'plugins)',
+    );
+  });
+
+  test('nothing over 512 MiB is fetched', () async {
+    final big = StoreIndex(
+      source: const StoreSourceInfo('big', 'Big'),
+      categories: const [StoreCategory('kits', 'Kits')],
+      items: [
+        StoreItem(
+          id: 'huge_kit',
+          name: 'Huge Kit',
+          kind: ItemKind.kit,
+          category: 'kits',
+          trust: TrustLevel.official,
+          versions: [
+            StoreItemVersion(
+              version: Version(1, 0, 0),
+              archive: StoreArchive(
+                url: 'a.zip',
+                sha256: 'a' * 64,
+                size: StoreArchive.maxSize + 1,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+    final source = MemoryStoreSource(big, const {});
+    final plan = Planner(
+      StoreCatalog([('big', source, big)]),
+      ProjectState(lock: StoreLock(), graph: const PackageGraph(['game'], {})),
+    ).install('huge_kit');
+    expect(
+      blockers(plan).single,
+      'Huge Kit 1.0.0 is 513 MiB; the store installs archives of up to '
+      '512 MiB.',
+    );
+    await expectLater(
+      Downloader().archive(source, big.items.single, big.items.single.latest!),
+      throwsA(isA<DownloadException>()),
+    );
+  });
+
+  test('an experimental or deprecated item is asked about first', () async {
+    final catalog = await catalogOf([
+      TestItem(
+        'just_new_kit',
+        kind: ItemKind.kit,
+        category: 'kits',
+        stage: 'experimental',
+      ),
+      TestItem(
+        'just_old_kit',
+        kind: ItemKind.kit,
+        category: 'kits',
+        stage: 'deprecated',
+        replacedBy: 'just_new_kit',
+      ),
+      TestItem('just_kit', kind: ItemKind.kit, category: 'kits'),
+    ]);
+    final planner = Planner(catalog, ProjectState(lock: StoreLock()));
+    String warnings(String id) => planner
+        .install(id)
+        .issues
+        .where((i) => i.level == IssueLevel.warning)
+        .map((i) => i.message)
+        .join('\n');
+    expect(
+      warnings('just_new_kit'),
+      contains('Just New Kit 1.0.0 is experimental: it may change or break'),
+    );
+    expect(
+      warnings('just_old_kit'),
+      contains(
+        'Just Old Kit is deprecated: it is no longer developed. Use Just New '
+        'Kit instead.',
+      ),
+    );
+    expect(warnings('just_kit'), isNot(contains('experimental')));
+    expect(catalog.entry('just_old_kit')!.item.replacedBy, 'just_new_kit');
+  });
+
+  test('where an item comes from, never what it says', () async {
+    final catalog = await catalogOf([
+      TestItem('just_kit', kind: ItemKind.kit, category: 'kits'),
+      TestItem(
+        'their_kit',
+        kind: ItemKind.kit,
+        category: 'kits',
+        trust: 'community',
+      ),
+    ]);
+    final official = catalog.entry('just_kit')!;
+    final theirs = catalog.entry('their_kit')!;
+    expect(ItemSource.of(entry: official), ItemSource.official);
+    expect(ItemSource.of(entry: theirs), ItemSource.thirdParty);
+    expect(
+      ItemSource.of(
+        entry: CatalogEntry('github:octocat/kit', theirs.item),
+      ),
+      ItemSource.unlisted,
+    );
+    LockedItem locked({
+      ItemOrigin origin = ItemOrigin.vendored,
+      String? source,
+      bool official = false,
+    }) => LockedItem(
+      version: '1.0.0',
+      kind: ItemKind.kit,
+      origin: origin,
+      path: 'plugins/kits/x',
+      source: source,
+      official: official,
+    );
+    // What the project recorded wins over the catalog.
+    expect(
+      ItemSource.of(entry: official, installed: locked(origin: ItemOrigin.linked)),
+      ItemSource.local,
+    );
+    expect(
+      ItemSource.ofInstalled(locked(source: 'github:octocat/kit')),
+      ItemSource.unlisted,
+    );
+    expect(ItemSource.ofInstalled(locked(official: true)), ItemSource.official);
+    expect(ItemSource.ofInstalled(locked(source: 'studio')), ItemSource.thirdParty);
+    expect(
+      [for (final s in ItemSource.values) s.label],
+      ['Official', 'Third Party', 'Unlisted', 'Local'],
+    );
+  });
+
+  test('names only official items may have', () async {
+    final catalog = await catalogOf([
+      TestItem(
+        'just_fake',
+        category: 'kits',
+        kind: ItemKind.kit,
+        trust: 'community',
+      ),
+      TestItem(
+        'flutter_test',
+        category: 'kits',
+        kind: ItemKind.kit,
+        trust: 'community',
+      ),
+      TestItem('just_kit', category: 'kits', kind: ItemKind.kit),
+    ]);
+    final planner = Planner(
+      catalog,
+      ProjectState(lock: StoreLock(), graph: const PackageGraph(['game'], {})),
+    );
+    for (final id in ['just_fake', 'flutter_test']) {
+      expect(
+        blockers(planner.install(id)).single,
+        contains("a name only the store's own team gives its items"),
+        reason: id,
+      );
+    }
+    expect(planner.install('just_kit').blockers, isEmpty);
+    expect(ReservedNames.isReserved('just'), isTrue);
+    expect(ReservedNames.isReserved('justice'), isFalse);
+  });
+
+  test(
+    'a community item is not added to a project pub never resolved',
+    () async {
+      final catalog = await catalogOf([
+        TestItem(
+          'their_kit',
+          category: 'kits',
+          kind: ItemKind.kit,
+          trust: 'community',
+        ),
+        TestItem('just_kit', category: 'kits', kind: ItemKind.kit),
+      ]);
+      final unresolved = Planner(catalog, ProjectState(lock: StoreLock()));
+      expect(
+        blockers(unresolved.install('their_kit')).single,
+        startsWith('Run pub get in this project first'),
+      );
+      expect(
+        unresolved.install('just_kit').blockers,
+        isEmpty,
+        reason: 'an official item is trusted with its name',
+      );
+    },
+  );
+
+  test(
+    'no item takes the place of a package another one gets from pub.dev',
+    () async {
+      final catalog = await catalogOf([
+        TestItem(
+          'their_lib',
+          category: 'kits',
+          kind: ItemKind.kit,
+          trust: 'community',
+        ),
+        TestItem(
+          'their_kit',
+          category: 'kits',
+          kind: ItemKind.kit,
+          trust: 'community',
+          dependencies: {'their_lib': '^1.0.0'},
+          pubDependencies: {'their_lib': '^1.0.0'},
+        ),
+      ]);
+      final planner = Planner(
+        catalog,
+        ProjectState(
+          lock: StoreLock(),
+          graph: const PackageGraph(['game'], {}),
+        ),
+      );
+      expect(
+        blockers(planner.install('their_kit')),
+        contains(
+          'Their Kit needs the package "their_lib" from pub.dev, and Their Lib '
+          'would take its place.',
+        ),
+      );
+    },
+  );
 
   test("a developer's own checkout is left alone", () async {
     final catalog = await catalogOf([
@@ -455,12 +773,13 @@ void main() {
       'pubspec.yaml': pubspecOf('app'),
       'pubspec_overrides.yaml':
           'dependency_overrides:\n  just_core:\n    path: ../dev/just_core\n',
-      'packages/kits/just_kit/just_store.json': jsonEncode(
+      'plugins/kits/just_kit/just_store.json': jsonEncode(
         manifest('just_kit', deps: {'just_core': '^1.0.0'}).toJson(),
       ),
       'packages/characters/someone_elses/pubspec.yaml': pubspecOf(
         'someone_elses',
       ),
+      'plugins/editors/their_tool/pubspec.yaml': pubspecOf('their_tool'),
     });
     project.writeLock(
       StoreLock(items: {'just_kit': locked('just_kit', '1.0.0')}),
@@ -472,13 +791,12 @@ void main() {
     expect(state.manifests.keys, ['just_kit']);
     expect(state.dependenciesOf('just_kit').keys, ['just_core']);
     expect(state.foreignOverrides.keys, ['just_core']);
-    expect(
-      state.existingFolders,
-      containsAll([
-        'packages/kits/just_kit',
-        'packages/characters/someone_elses',
-      ]),
-    );
+    // Both roots: content's and the plugins'.
+    expect(state.existingFolders, {
+      'plugins/kits/just_kit',
+      'packages/characters/someone_elses',
+      'plugins/editors/their_tool',
+    });
     expect('${state.installedVersion('just_kit')}', '1.0.0');
     expect(File('${dir.path}/just_store.lock.json').existsSync(), isTrue);
   });
@@ -770,7 +1088,7 @@ void main() {
           kind: ItemKind.kit,
           category: 'kits',
           versions: [StoreItemVersion(version: Version(1, 0, 0))],
-          // The default when a catalog says nothing: official.
+          trust: TrustLevel.official,
         ),
       ],
     );
@@ -779,6 +1097,12 @@ void main() {
     ]).entry('their_kit')!.item.trust;
     expect(trustFrom('https://catalog.example.com/'), TrustLevel.community);
     expect(trustFrom('memory:/'), TrustLevel.official);
+    expect(trustFrom('file:///C:/catalog/'), TrustLevel.official);
+    expect(
+      trustFrom('file://server/share/catalog/'),
+      TrustLevel.community,
+      reason: 'another machine\'s share is not this machine',
+    );
     expect(
       trustFrom(
         SourceConfig.official.url.substring(
@@ -820,6 +1144,66 @@ void main() {
       isNot(contains(contains('was taken down'))),
       reason: 'the update replaces it',
     );
+  });
+
+  test('an item the store removed is named in every plan, as its source '
+      'or a vouching catalog says', () async {
+    StoreIndex removing(String sourceId) => StoreIndex.checked(
+      source: StoreSourceInfo(sourceId, sourceId),
+      categories: const [],
+      items: const [],
+      removed: const [RemovedItem('k', 'It held malware.')],
+    );
+    final source = buildCatalog(tempDir('cat'), [TestItem('other')]);
+    final listing = (await source.fetchIndex()).index;
+    final state = ProjectState(
+      lock: StoreLock(
+        items: {
+          'k': LockedItem(
+            version: '1.0.0',
+            kind: ItemKind.content,
+            origin: ItemOrigin.vendored,
+            category: 'characters',
+            path: 'packages/characters/k',
+            source: 'studio',
+          ),
+        },
+      ),
+    );
+    final web = MemoryStoreSource(
+      removing('stranger'),
+      const {},
+      base: 'https://stranger.example.com/',
+    );
+    // Another web catalog can't take down what it didn't provide…
+    var catalog = StoreCatalog([
+      ('test', source, listing),
+      ('stranger', web, web.index),
+    ]);
+    expect(catalog.removal('k', source: 'studio'), isNull);
+    expect(
+      Planner(catalog, state).install('other').issues.map((i) => i.message),
+      isNot(contains(contains('taken down'))),
+    );
+    // …but the catalog it came from can.
+    final studio = MemoryStoreSource(
+      removing('studio'),
+      const {},
+      base: 'https://studio.example.com/',
+    );
+    catalog = StoreCatalog([
+      ('test', source, listing),
+      ('studio', studio, studio.index),
+    ]);
+    expect(catalog.removal('k', source: 'studio')?.reason, 'It held malware.');
+    expect(
+      Planner(catalog, state).install('other').issues.map((i) => i.message),
+      contains('k was taken down by the store: It held malware. Uninstall it.'),
+    );
+    // A catalog on this machine (or the official one) vouches for all.
+    final local = MemoryStoreSource(removing('local'), const {});
+    catalog = StoreCatalog([('local', local, local.index)]);
+    expect(catalog.removal('k', source: 'studio'), isNotNull);
   });
 
   test('uninstalling refuses to take a dependency your code imports', () async {

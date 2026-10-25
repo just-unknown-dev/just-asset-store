@@ -9,5 +9,7 @@
   "license": {"attribution": "Knight by Your Name (CC BY 4.0)", "spdx": "CC-BY-4.0"},
   "name": "Your item",
   "schema": 1,
+  "summary": "One line about it, for its card in the store.",
+  "tags": ["knight", "sprite"],
   "version": "1.0.0"
 }

@@ -21,8 +21,15 @@ class TestItem {
     this.attribution,
     this.access = 'public',
     this.pubDependencies = const {},
+    List<String>? permissions,
+    String? stage,
+    this.replacedBy,
+    this.previews = const [],
     this.mutate,
-  });
+  }) : permissions =
+           permissions ?? (nativePlugins.isEmpty ? const [] : const ['native']),
+       // Every plugin names one.
+       stage = stage ?? (kind.isPlugin ? 'beta' : null);
 
   final String id;
   final ItemKind kind;
@@ -41,6 +48,19 @@ class TestItem {
   final String? attribution;
   final String access;
   final Map<String, String> pubDependencies;
+
+  /// What its manifest and catalog entry say it may do: `native` when it
+  /// brings native plugins, unless given.
+  final List<String> permissions;
+
+  /// Its stage: `beta` for a plugin unless given, none otherwise.
+  final String? stage;
+
+  /// What replaces it, when deprecated.
+  final String? replacedBy;
+
+  /// Its pictures, inside the package (written as small stand-ins).
+  final List<String> previews;
 
   /// Changes a version's files before zipping, to make a bad package.
   final void Function(String version, Map<String, List<int>> files)? mutate;
@@ -90,6 +110,10 @@ Map<String, List<int>> packageFiles(TestItem item, String version) {
     'kind': item.kind.id,
     'category': item.category,
     'dependencies': item.dependencies,
+    if (item.permissions.isNotEmpty) 'permissions': item.permissions,
+    'stage': ?item.stage,
+    'replacedBy': ?item.replacedBy,
+    if (item.previews.isNotEmpty) 'previews': item.previews,
     if (item.modules.isNotEmpty)
       'editor': {
         'modules': [
@@ -112,6 +136,7 @@ Map<String, List<int>> packageFiles(TestItem item, String version) {
     'pubspec.yaml': utf8.encode('$pubspec'),
     ItemManifest.fileName: utf8.encode(jsonEncode(manifest)),
     for (final e in files.entries) e.key: utf8.encode(e.value),
+    for (final p in item.previews) p: utf8.encode('picture $p'),
   };
 }
 

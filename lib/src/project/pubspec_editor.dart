@@ -23,6 +23,8 @@ export 'package:just_core_cli/just_core_cli.dart'
 ///   # >>> just_asset_store managed (edit in the Asset Store) >>>
 ///   just_art_knight:
 ///     path: packages/characters/just_art_knight
+///   just_platformer_kit:
+///     path: plugins/kits/just_platformer_kit
 ///   # <<< just_asset_store managed <<<
 /// ```
 ///

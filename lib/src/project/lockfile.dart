@@ -9,7 +9,9 @@ import '../version.dart';
 
 /// Where an installed item's code comes from.
 enum ItemOrigin {
-  /// Copied into `packages/{category}/{id}/` by the store.
+  /// Copied into the project by the store: content into
+  /// `packages/{category}/{id}/`, an editor extension or a kit into
+  /// `plugins/{category}/{id}/` ([ItemKind.installFolder]).
   vendored,
 
   /// A checkout the store found already overridden by someone else (a
@@ -59,6 +61,7 @@ final class LockedItem {
     this.files = const {},
     this.entitlement,
     this.system = false,
+    this.official = false,
   });
 
   /// Reads one from [json].
@@ -96,6 +99,7 @@ final class LockedItem {
       files: files,
       entitlement: json.optString('entitlement'),
       system: json.flag('system'),
+      official: json.flag('official'),
     );
   }
 
@@ -141,8 +145,14 @@ final class LockedItem {
   /// For paid items: the order or licence reference. Never a secret.
   final String? entitlement;
 
-  /// Part of the editor itself: never uninstalled.
+  /// Part of the editor itself: never uninstalled. Only an official item
+  /// can be.
   final bool system;
+
+  /// Installed as an official item (the store's own team made it): what
+  /// rebuilding it from [archive] checks it as. Anything else is checked
+  /// as a community item.
+  final bool official;
 
   /// Whether it belongs under `dev_dependencies`: editor-only extensions
   /// do, so Flutter leaves their native plugins out of release builds.
@@ -163,6 +173,7 @@ final class LockedItem {
     Map<String, String>? files,
     String? entitlement,
     bool? system,
+    bool? official,
   }) => LockedItem(
     version: version ?? this.version,
     kind: kind,
@@ -178,6 +189,7 @@ final class LockedItem {
     files: files ?? this.files,
     entitlement: entitlement ?? this.entitlement,
     system: system ?? this.system,
+    official: official ?? this.official,
   );
 
   /// This item as JSON.
@@ -197,6 +209,7 @@ final class LockedItem {
     'files': files,
     'entitlement': entitlement,
     'system': system ? true : null,
+    'official': official ? true : null,
   });
 }
 
@@ -258,17 +271,27 @@ final class StoreLock {
         final item = LockedItem.fromJson(raw.object(id));
         // The store moves, replaces and restores a vendored item's folder,
         // so it must be the one the store gave it: never a path that leads
-        // elsewhere in the project, or out of it.
+        // elsewhere in the project, or out of it. Its kind says which: a
+        // plugin's folder is in `plugins/`, content's in `packages/`.
         if (item.origin == ItemOrigin.vendored) {
           final category = item.category;
           if (category == null || !StoreNames.isCategory(category)) {
             throw raw.error(id, 'A vendored item records its category.');
           }
-          final want = 'packages/$category/$id';
+          final folder = item.kind.installFolder;
+          if (folder == null) {
+            throw raw.error(
+              id,
+              'A ${item.kind.id} item is never copied into the project, so '
+              'it cannot be vendored.',
+            );
+          }
+          final want = '$folder/$category/$id';
           if (item.path != want) {
             throw raw.error(
               id,
-              'A vendored item lives in "$want", not "${item.path}".',
+              'A vendored ${item.kind.id} item lives in "$want", not '
+              '"${item.path}".',
             );
           }
         }

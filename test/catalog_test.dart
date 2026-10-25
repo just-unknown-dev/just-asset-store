@@ -29,6 +29,7 @@ Map<String, Object?> knight({Map<String, Object?> extra = const {}}) => {
   'author': {'name': 'Just'},
   'license': {'spdx': 'CC0-1.0'},
   'thumbnail': 'thumbs/just_art_knight.png',
+  'trust': 'official',
   'versions': [
     {
       'version': '1.0.0',
@@ -68,6 +69,8 @@ Map<String, Object?> spriteEditor() => {
       'archive': {'url': 'a.zip', 'sha256': sha, 'size': 10},
       'dependencies': {'just_game_engine_editor': '^0.1.0'},
       'nativePlugins': ['file_selector'],
+      'permissions': ['files', 'native'],
+      'stage': 'beta',
     },
   ],
 };
@@ -102,6 +105,20 @@ void main() {
       final k = catalog.item('just_art_knight')!;
       expect(k.kind, ItemKind.content);
       expect(k.isOfficial, isTrue);
+      expect(
+        catalog.item('just_sprite_editor')!.latest!.permissions,
+        {ItemPermission.native, ItemPermission.files},
+      );
+      expect(k.latest!.permissions, isEmpty);
+      final editor = catalog.item('just_sprite_editor')!;
+      expect(editor.stage, ItemStage.beta);
+      expect(editor.replacedBy, isNull);
+      expect(k.stage, isNull);
+      expect(
+        catalog.item('just_tiled')!.trust,
+        TrustLevel.community,
+        reason: 'a catalog that says nothing vouches for nothing',
+      );
       expect(k.pricing.isFree, isTrue);
       expect('${k.latest!.version}', '1.1.0', reason: '1.2.0 is yanked');
       expect(k.available.length, 2);
@@ -183,7 +200,12 @@ void main() {
     });
 
     test('a newer format asks for a newer store', () {
-      expect(() => read(index()..['schema'] = 2), failsAt('schema'));
+      expect(
+        () => read(index()..['schema'] = StoreIndex.currentSchema + 1),
+        failsAt('schema'),
+      );
+      // Format 1 and 2 catalogs that list their items read alike.
+      expect(read(index()..['schema'] = 2).items, isNotEmpty);
     });
 
     test('refusals say where', () {
@@ -228,6 +250,41 @@ void main() {
           ),
         ),
         failsAt('items[0].category'),
+      );
+      Map<String, Object?> withPermissions(List<String> p) => knight(
+        extra: {
+          'versions': [
+            {
+              'version': '1.0.0',
+              'archive': {'url': 'a.zip', 'sha256': sha, 'size': 1},
+              'permissions': p,
+            },
+          ],
+        },
+      );
+      expect(
+        () => read(index(items: [withPermissions(['network'])])),
+        failsAt('items[0].versions[0].permissions'),
+        reason: 'a content item holds no code',
+      );
+      expect(
+        () => read(
+          index(
+            items: [
+              {
+                ...spriteEditor(),
+                'versions': [
+                  {
+                    'version': '0.1.0',
+                    'archive': {'url': 'a.zip', 'sha256': sha, 'size': 1},
+                    'permissions': ['everything'],
+                  },
+                ],
+              },
+            ],
+          ),
+        ),
+        failsAt('items[0].versions[0].permissions'),
       );
       expect(
         () => read(
@@ -374,6 +431,40 @@ void main() {
         canonicalJson(readManifest(m.toJson()).toJson()),
         canonicalJson(m.toJson()),
       );
+    });
+
+    test('a stage, and what replaces a deprecated item', () {
+      final beta = readManifest({...kit(), 'stage': 'beta'});
+      expect(beta.stage, ItemStage.beta);
+      expect(readManifest(beta.toJson()).stage, ItemStage.beta);
+      final gone = readManifest({
+        ...kit(),
+        'stage': 'deprecated',
+        'replacedBy': 'just_platformer_kit_two',
+      });
+      expect(gone.replacedBy, 'just_platformer_kit_two');
+      expect(readManifest(kit()).stage, isNull);
+      expect(
+        () => readManifest({...kit(), 'stage': 'gold'}),
+        failsAt('stage'),
+      );
+      expect(
+        () => readManifest({...kit(), 'stage': 'beta', 'replacedBy': 'x_kit'}),
+        failsAt('replacedBy'),
+        reason: 'only a deprecated item is replaced',
+      );
+      expect(
+        () => readManifest({
+          ...kit(),
+          'stage': 'deprecated',
+          'replacedBy': 'just_platformer_kit',
+        }),
+        failsAt('replacedBy'),
+        reason: 'not by itself',
+      );
+      expect(ItemStage.experimental.hiddenByDefault, isTrue);
+      expect(ItemStage.deprecated.hiddenByDefault, isTrue);
+      expect(ItemStage.beta.hiddenByDefault, isFalse);
     });
 
     test('an editor extension is editor-only', () {

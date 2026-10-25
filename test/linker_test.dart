@@ -29,6 +29,7 @@ Directory project({String extra = ''}) {
       'name': 'Tool',
       'version': '1.2.0',
       'kind': 'editor-extension',
+      'stage': 'beta',
       'category': 'editors',
       'editor': {
         'modules': [
@@ -86,28 +87,30 @@ void main() {
     final pub = FakePub();
     final result = await StoreLinker.vendor(p, ['just_tool'], pub: pub);
 
-    expect(result.changes.single.path, 'packages/editors/just_tool');
+    // An editor extension is a plugin: it goes in plugins/.
+    expect(result.changes.single.path, 'plugins/editors/just_tool');
     expect(
       File(
-        '${dir.path}/packages/editors/just_tool/lib/editor.dart',
+        '${dir.path}/plugins/editors/just_tool/lib/editor.dart',
       ).existsSync(),
       isTrue,
     );
     expect(
-      File('${dir.path}/packages/editors/just_tool/bin/tool.dart').existsSync(),
+      File('${dir.path}/plugins/editors/just_tool/bin/tool.dart').existsSync(),
       isTrue,
       reason: 'official tools may',
     );
     expect(
-      Directory('${dir.path}/packages/editors/just_tool/test').existsSync(),
+      Directory('${dir.path}/plugins/editors/just_tool/test').existsSync(),
       isFalse,
     );
     expect(
       Directory(
-        '${dir.path}/packages/editors/just_tool/.dart_tool',
+        '${dir.path}/plugins/editors/just_tool/.dart_tool',
       ).existsSync(),
       isFalse,
     );
+    expect(Directory('${dir.path}/packages').existsSync(), isFalse);
     expect(
       Directory('${dir.path}/dev/just_tool').existsSync(),
       isTrue,
@@ -124,12 +127,15 @@ void main() {
       reason: 'taken over',
     );
     expect(pubspec.managed('dev_dependencies'), {
-      'just_tool': const PathDependency('packages/editors/just_tool'),
+      'just_tool': const PathDependency('plugins/editors/just_tool'),
     });
-    expect(pubspec.managed('dependency_overrides').keys, ['just_tool']);
+    expect(pubspec.managed('dependency_overrides'), {
+      'just_tool': const PathDependency('plugins/editors/just_tool'),
+    });
 
     final item = p.readLock().items['just_tool']!;
     expect(item.origin, ItemOrigin.vendored);
+    expect(item.path, 'plugins/editors/just_tool');
     expect(item.archive, isNull);
     expect(item.source, isNull);
     expect(

@@ -156,6 +156,36 @@ void main() {
       }
     });
 
+    test('a packed plugin validates, with its version file or without', () async {
+      final pkg = tempDir('pkg');
+      packageFiles(
+        TestItem(
+          'just_tool',
+          kind: ItemKind.editorExtension,
+          category: 'editors',
+          modules: const ['ToolModule'],
+          files: const {'lib/editor.dart': '// tool'},
+          permissions: const ['files'],
+        ),
+        '1.0.0',
+      ).forEach((path, bytes) {
+        File('${pkg.path}/$path')
+          ..parent.createSync(recursive: true)
+          ..writeAsBytesSync(bytes);
+      });
+      final out = tempDir('out');
+      var (code, _, err) = await store(['pack', pkg.path, '-o', out.path]);
+      expect(code, 0, reason: err);
+      final zip = '${out.path}/just_tool-1.0.0.zip';
+      // Beside its version file: checked against what the catalog will say.
+      (code, _, err) = await store(['validate', zip]);
+      expect(code, 0, reason: err);
+      // On its own: against its manifest (its stage and permissions too).
+      File('${out.path}/just_tool-1.0.0.json').deleteSync();
+      (code, _, err) = await store(['validate', zip]);
+      expect(code, 0, reason: err);
+    });
+
     test('an output folder inside the package is left out of it', () async {
       final pkg = packageFolder();
       for (var run = 0; run < 2; run++) {
@@ -167,6 +197,32 @@ void main() {
         ]);
         expect(code, 0, reason: 'run $run: $err');
       }
+    });
+
+    test('its pictures go beside the archive, under their names', () async {
+      final pkg = tempDir('pkg');
+      packageFiles(
+        TestItem(
+          'just_art_knight',
+          previews: ['store/card.png', 'store/shots/run.png'],
+        ),
+        '1.0.0',
+      ).forEach((path, bytes) {
+        File('${pkg.path}/$path')
+          ..parent.createSync(recursive: true)
+          ..writeAsBytesSync(bytes);
+      });
+      final out = tempDir('out');
+      final (code, _, err) = await store(['pack', pkg.path, '-o', out.path]);
+      expect(code, 0, reason: err);
+      expect(
+        File('${out.path}/card.png').readAsStringSync(),
+        'picture store/card.png',
+      );
+      expect(
+        File('${out.path}/run.png').readAsStringSync(),
+        'picture store/shots/run.png',
+      );
     });
 
     test('without --url, the placeholder names the release tag', () async {
@@ -310,7 +366,7 @@ void main() {
       );
 
       (code, out, err) = await store(['list', ...common]);
-      expect(out, contains('just_art_knight 1.0.0  (content, vendored)'));
+      expect(out, contains('just_art_knight 1.0.0  (content, Official)'));
       (code, out, err) = await store(['list', '--json', ...common]);
       final doc = jsonDecode(out) as Map;
       expect(doc['ok'], isTrue);
