@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- **The official catalog moved to `https://asset.justunknown.com/index.json`** (`SourceConfig.official`), and with it the store website the editor links to (an item's page, reporting it, publishing).
+
 ## 0.2.0
 
 A catalog in pieces, and what a store backend needs to check a release before downloading it.

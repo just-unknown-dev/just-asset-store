@@ -53,7 +53,7 @@ final class SourceConfig {
 
   /// The official catalog.
   static const SourceConfig official = SourceConfig(
-    'https://store.justunknown.com/index.json',
+    'https://asset.justunknown.com/index.json',
     name: 'Just Asset Store',
   );
 

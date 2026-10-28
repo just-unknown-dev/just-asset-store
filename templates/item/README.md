@@ -65,6 +65,6 @@ Then for each version:
    - packs the package: the same bytes on any OS, with text files in LF
    - creates the Release, with three files: the archive `<id>-<version>.zip`, the catalog's version file `<id>-<version>.json`, and `just_release.json` (which carries your claim code)
 3. List it:
-   - **In the Just Asset Store:** submit the repository once at [store.justunknown.com](https://store.justunknown.com); later releases are found from their `just_release.json`.
+   - **In the Just Asset Store:** submit the repository once at [asset.justunknown.com](https://asset.justunknown.com); later releases are found from their `just_release.json`.
    - **In a catalog of your own** (the repository's `templates/catalog`): add the version file as `items/<id>/versions/<version>.json` in a pull request; the first release also needs `items/<id>/item.json`.
    - **Unlisted:** anyone can install it straight from the repository with `just store install https://github.com/<owner>/<repo>`, after being told nobody reviewed it.

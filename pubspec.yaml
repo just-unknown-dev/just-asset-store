@@ -1,6 +1,6 @@
 name: just_asset_store
 description: "The core of the Just Asset Store: reads catalogs, checks item archives and installs items into Flutter projects as packages, with the `just store` commands."
-version: 0.2.0
+version: 0.2.1
 homepage: https://github.com/just-unknown-dev/just-asset-store
 repository: https://github.com/just-unknown-dev/just-asset-store
 issue_tracker: https://github.com/just-unknown-dev/just-asset-store/issues

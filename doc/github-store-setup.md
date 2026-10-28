@@ -2,7 +2,7 @@
 
 How the Just Asset Store's items are made and released, and how to run a catalog of your own on GitHub Pages.
 
-**The official catalog** is not a repository you edit. Its records are in Firestore, written only by the backend's GitHub Actions in the website's repository (`packages/just_asset_store_backend`), and it is served with the website from Cloudflare Pages, at `https://store.justunknown.com/index.json` — the address `SourceConfig.official` reads. A package gets in by being submitted on the website once; its later releases are found by the backend's hourly refresh, from the `just_release.json` every release carries.
+**The official catalog** is not a repository you edit. Its records are in Firestore, written only by the backend's GitHub Actions in the website's repository (`packages/just_asset_store_backend`), and it is served with the website from Cloudflare Pages, at `https://asset.justunknown.com/index.json` — the address `SourceConfig.official` reads. A package gets in by being submitted on the website once; its later releases are found by the backend's hourly refresh, from the `just_release.json` every release carries.
 
 Everything below assumes the GitHub organization **`just-unknown-dev`**. If you use another organization, or other names, change them in the places listed under [Names baked into the code](#names-baked-into-the-code).
 
@@ -293,7 +293,7 @@ Until the broker exists, the store shows such items but won't install them.
 
 | Name | Where |
 |---|---|
-| The official catalog `https://store.justunknown.com/index.json`, which calls itself `just` | `lib/src/sources/store_source.dart`: `SourceConfig.official`, `SourceConfig.officialId` |
+| The official catalog `https://asset.justunknown.com/index.json`, which calls itself `just` | `lib/src/sources/store_source.dart`: `SourceConfig.official`, `SourceConfig.officialId` |
 | The store tool's version the workflows install | `STORE_VERSION` in the three workflows in `templates/` |
 | A catalog's homepage, maintainers and publishers | `templates/catalog/catalog.json`, `templates/catalog/publishers/` |
 
