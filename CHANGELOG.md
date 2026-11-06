@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.3.0
+
+The store's own layout, redirects that can't lead inside, installs that keep the editor drawing, and edits that are never lost without a word. Requires just_core_cli ^0.2.0.
+
+### Breaking
+
+- **Aliases gone** (one word per concept): `StoreFormatException` → `JsonFormatException`, `StoreNames` → `PackageNames`, `SourceException` → `FetchException` — just_core_cli's names, which the store has always thrown and still exports.
+- **`InstallFailure.rolledBack` → `InstallFailure.state`**, an `InstallFailureState`: `untouched` (it failed before the change began: a download, a check, a busy project, a plan that can't apply), `undone` (rolled back), `unfinished` (undoing it failed too; the next store command finishes). `rolledBack: false` used to mean both "never touched" and "half changed".
+- **`Planner.uninstall(id, references:)`** takes the references of every item going, by id (`Map<String, List<PackageReference>>`); `referencesOf:` is gone. **`AssetStore.planUninstall(id, {catalog, planner})`** plans it, scanning the project once for all of them; **`AssetStore.referencesTo(Set<String> ids)`** is that scan, async, by id (it took one id and `ignoring:`).
+- **`ReferenceScan.find(project, targets, {alsoSearch, excluding})`** finds several packages in one pass: `targets` are `ReferenceTarget(name, componentTypes:)`, `excluding` a list of folders, and the result is by name.
+- **`FileHashes.ofFolder(dir)` → `FolderHashes.of(dir)`.** `FileHashes` (the hash rule, unchanged byte for byte) is web-safe now, in the lockfile's folder; the folder walk needs `dart:io`.
+- **Internal now** (not exported, `@internal`): the 17 subcommands (`InstallCommand` … `TemplateCommand`) and `StoreProjectCommand` — only `StoreCommand` is public; `absoluteIn`; `PubspecFacts`, `PubDependency`, `HostedPubDependency`, `SdkPubDependency`, `OtherPubDependency`, `PubspecFormatException`; `plainText`, `optPlainText`.
+- **`StoreLock.generator` is gone** (and `StoreLock(generator:)`): it was read and never written back. The file is still stamped with the store writing it (`storeGenerator`).
+- **`StoreProject.workDir` → `StoreProject.changesDir`** (`.just_changes`): where just_core_cli 0.2.0 keeps journals, staging and the lock.
+- **The lockfile records a folder catalog, and its archives, by their path from the project** (`store_catalog/index.json`, `../catalogs/mine/index.json`), no longer this machine's `file:///C:/…`; a relative one is read from the project's root, wherever the tool runs from. Older lockfiles' `file:` URLs still read.
+- **A package's path, installed, may be at most 160 characters** (`PackageCheck.maxInstalledPath`: `plugins/<category>/<id>/<path>`), leaving room for the project's folder and the trash under Windows' 260. The longest in the official plugins is 89.
+- **`ItemManifest.setupFile`** must be a plain path inside the project, as every other path in a manifest.
+- **The catalog cache's file names changed** (one per catalog address, named by its SHA-256): each web catalog is fetched once more after the update.
+
+### Added
+
+- `StoreSource.mayFetch(uri)`: the one rule for where a catalog may make the store fetch — https (plain http to this machine only, never from a catalog on https), and never from the web into this machine or its network. `StoreSource.vouches`, `FolderStoreSource.chosen` and `SourceConfig.fromLockfile`.
+- `AssetStore.withLocalEdits(plan)`, `LocalEdits.find`, `InstallResult.trashFolder` and `InstallPlan.withIssues`.
+- `InstallPlan.unpackedBytes` and `InstallPlan.largeUnpack`: a plan that unpacks more than 1 GiB warns first.
+- `StoreProject.recordedSource`, `sourceLocation` and `recordsSource`; `StoreRegistry.holds`; `ReferenceScan.codeFolders`; `ReferenceTarget`.
+- `test/library_layout_test.dart`, the layout's guard (README, "How the package is laid out").
+
+### Changed
+
+- **Layout.** `lib/src` is in feature folders, each with one barrel, in layers: `catalog` → `checks`, `lockfile` → `project`, `sources` → `publishing` → `install` → `store` → `commands`. The re-export shims (`archive/`, `crypto/`, `catalog/json.dart`, `semver.dart`, `project/overrides_target.dart`, `package_info.dart`, `pub_runner.dart`) and `native.dart` are gone: the public library exports each barrel, the native ones `if (dart.library.js_interop) 'src/web.dart'`, and every name it exported before (just_core_cli's included) it still exports. `store_index.dart`, `store_source.dart` (whose sources are its `part`s), `planner.dart` and `store_command.dart` are split; `tools/` is `publishing/`. The `install ↔ tools` import loop is gone.
+- **Installs keep the editor drawing.** Hashing, inflating and checking an archive, reading and hashing a cached one, the pin check, and the scan before an uninstall run on another isolate (`Isolate.run`; the web never installs). A plan holds one package's files at a time: each is checked and hashed, then unpacked again — from the download cache — when it is staged. Before, every package of a plan stayed unpacked in memory until the change ended.
+- **Uninstall planning** scans the project once for every item going, and reads Dart in `test/`, `integration_test/`, `test_driver/`, `tool/`, `bin/`, `example/` and `benchmark/` as well as `lib/`: removing a package your tests import would stop `flutter test` compiling.
+- **Templates** are filled in by just_core_cli's `TemplateRenderer`, as `just create` fills its own: `{{title.dart}}`, `{{title.yaml}}`, `{{title.json}}`, `{{title.xml}}` and `{{title.c}}` are escaped for where they go, and a title no file could hold is refused. A template may not write into `.just_changes/` (where just_core_cli 0.2.0 keeps the journals crash recovery replays, as it may not into `.dart_tool/`), nor Flutter's `.flutter-plugins` and `.flutter-plugins-dependencies`.
+- **`JustRelease` (`just_release.json`) is web-safe**, in `catalog/` with the other file formats: a website reads a release's claim code with it.
+- `FileHashes` is the store's own (moved from just_core_cli 0.1.2 unchanged, so every hash in a `just_store.lock.json` stays the same; pinned by a test); so is the thumbnail cache's file name.
+- The catalog templates' workflows install the store 0.3.0 (`STORE_VERSION`), as the README's `activate` line does.
+
+### Fixed
+
+- **Redirects got around the private-network rule.** The rule checked only the address a catalog names; a server on the web could redirect a download, a catalog or a picture to `https://192.168.1.1/…` or `169.254.169.254`, and the request went out (0.2.0 said it couldn't). Every fetch — `HttpStoreSource`, `GitHubSource`, and through them the `Downloader`'s archives and pictures, and `restore` — passes `mayFetch` as just_core_cli's redirect rule, asked before anything is sent. (DNS rebinding, a public name resolving to a private address, is not covered.)
+- **An update replaced edited files without a word.** The lockfile's file hashes were written and never read. `just store` (and the editor, through `withLocalEdits`) now names them first, and says where the old folder went.
+- **A stale plan undid another change.** A plan is checked under the project's lock against the lockfile then: an item it installs that is installed now, or one it changes whose entry changed, refuses it ("plan again"), touching nothing.
+- **CRLF checkouts:** an install rewrote the generated registries whenever git had checked them out with CRLF, and the editor then asked for a restart for an art install. "Unchanged" now means what `generate --check` means, line endings aside.
+- **`%2e%2e/` climbed out:** a catalog path beside `index.json` is checked once its escapes are read, so `%2e%2e/%2e%2e/x.zip` and `..%2fx.png` are refused as `../` is.
+- `just store restore` said "Unexpected error" for a busy project; it says the project is busy, exit code 1.
+- Two web catalogs whose long addresses ended alike shared one cache file and pieces folder (offline, one was served as the other).
+- A folder catalog named only in a shared project's lockfile vouched for its items as one you chose: official badges, reserved `just_…` names, `bin/`, `system`. Only a folder you name in this run (`--source`) or in the editor's settings does.
+- The package's own CI on the web: two test files could not compile for the web (they reached the native half), and one test's noise was not noise in JavaScript (its generator overflowed 2^53). `dart test -p chrome`, as JavaScript and as WebAssembly, passes.
+- `applyPlan`'s doc sat on `tags`; `StoreRestore.run`'s said `pub get` ran inside the change (it runs once the change has committed).
+
+### Removed
+
+- The tests of just_core_cli's own code run through the store's re-exports (ZIP, versions, SHA-256 and the pubspec editor: four test files, 89 test runs, and their fixtures); just_core_cli tests them. A test of the store's own pubspec block stays.
+
 ## 0.2.1
 
 - **The official catalog moved to `https://asset.justunknown.com/index.json`** (`SourceConfig.official`), and with it the store website the editor links to (an item's page, reporting it, publishing).

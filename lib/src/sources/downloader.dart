@@ -2,15 +2,14 @@
 library;
 
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:just_core_cli/fetch.dart';
+import 'package:just_core_cli/project.dart';
 
-import '../catalog/store_index.dart';
-import '../project/store_project.dart';
+import '../catalog/store_item.dart';
 import 'store_source.dart';
-
-export 'package:just_core_cli/fetch.dart' show DownloadCache, DownloadException;
 
 /// Fetches archives and thumbnails through a [DownloadCache].
 final class Downloader {
@@ -24,7 +23,7 @@ final class Downloader {
   /// checked against the size and SHA-256 the catalog pinned.
   ///
   /// Throws [DownloadException] when the bytes don't match,
-  /// [SourceException] when they can't be fetched, and
+  /// [FetchException] when they can't be fetched, and
   /// [CancelledException].
   Future<Uint8List> archive(
     StoreSource source,
@@ -46,7 +45,12 @@ final class Downloader {
         'downloads archives of up to ${_mib(StoreArchive.maxSize)}.',
       );
     }
-    final cached = cache?.archive(pin.sha256);
+    final cache = this.cache;
+    // Reading and hashing a large archive takes seconds: on another
+    // isolate, never the caller's (the editor's window keeps drawing).
+    final cached = cache == null
+        ? null
+        : await Isolate.run(() => cache.archive(pin.sha256));
     if (cached != null) {
       onProgress?.call(cached.length, cached.length);
       return cached;
@@ -62,13 +66,11 @@ final class Downloader {
       cancel: cancel,
       maxBytes: pin.size,
     );
-    checkPinned(
-      bytes,
-      size: pin.size,
-      sha256: pin.sha256,
-      what: '${item.name} ${version.version}',
-    );
-    cache?.putArchive(pin.sha256, bytes);
+    final what = '${item.name} ${version.version}';
+    await Isolate.run(() {
+      checkPinned(bytes, size: pin.size, sha256: pin.sha256, what: what);
+      cache?.putArchive(pin.sha256, bytes);
+    });
     return bytes;
   }
 
@@ -87,16 +89,12 @@ final class Downloader {
     }
     // A picture is fetched as soon as its card shows: from the web only
     // over https, and never from this machine's network for a catalog on
-    // the web (a catalog tried out on this machine may use plain http).
-    final local = source.indexUri.scheme == 'http' &&
-        StoreSource.isPrivateHost(source.indexUri.host);
-    if ((uri.scheme != 'https' && !(uri.scheme == 'http' && local)) ||
-        source.leadsInside(uri)) {
-      return null;
-    }
+    // the web (a catalog tried out on this machine may use plain http) —
+    // nor any redirect there ([StoreSource.mayFetch]).
+    if (!source.mayFetch(uri)) return null;
     final c = cache;
     if (c == null) return null;
-    final file = c.thumbnailFile(uri);
+    final file = _thumbnailFile(c, uri);
     if (file.existsSync()) return file;
     try {
       final bytes = await source.readBytes(uri, maxBytes: 4 * 1024 * 1024);
@@ -106,4 +104,16 @@ final class Downloader {
       return null;
     }
   }
+}
+
+/// Where the picture at [uri] is cached in [cache] (just_core_cli 0.1.2's
+/// `DownloadCache.thumbnailFile`, unchanged).
+File _thumbnailFile(DownloadCache cache, Uri uri) {
+  final name = uri.pathSegments.isEmpty ? '' : uri.pathSegments.last;
+  final dot = name.lastIndexOf('.');
+  final ext = dot < 0 ? 'img' : name.substring(dot + 1).toLowerCase();
+  final safeExt = RegExp(r'^[a-z0-9]{1,5}$').hasMatch(ext) ? ext : 'img';
+  return File(
+    '${cache.dir}/thumbnails/${Sha256.hexOf('$uri'.codeUnits).substring(0, 32)}.$safeExt',
+  );
 }

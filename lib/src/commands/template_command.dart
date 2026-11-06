@@ -7,18 +7,23 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:just_core_cli/just_core_cli.dart';
+import 'package:meta/meta.dart';
 
 import '../catalog/item_manifest.dart';
-import '../catalog/store_index.dart';
-import '../install/planner.dart';
+import '../catalog/item_traits.dart';
+import '../install/install_plan.dart';
+import '../lockfile/file_hashes.dart';
 import '../project/store_project.dart';
-import 'store_command.dart';
+import 'store_project_command.dart';
 
 /// `just store template <id>[@<version>]`: a template item's `template/`
-/// folder written over the project — its placeholders (`{{name}}`,
-/// `{{title}}`, `{{App}}`) filled in for this project — and then the items it
+/// folder written over the project — its placeholders filled in for this
+/// project by just_core_cli's [TemplateRenderer], as `just create` fills
+/// its own (`{{name}}`, `{{App}}`, `{{title}}`, and the title escaped for
+/// Dart, YAML, JSON, XML and C: `{{title.dart}}`…) — and then the items it
 /// depends on installed. `just create --template <id>` runs it on a new
 /// project.
+@internal
 final class TemplateCommand extends StoreProjectCommand {
   /// The command and its options.
   TemplateCommand() {
@@ -172,24 +177,29 @@ final class TemplateCommand extends StoreProjectCommand {
   }
 
   /// Folders a template may not write into, anywhere in its tree: git's,
-  /// the tools' scratch folders (journals that crash recovery replays) and
+  /// the tools' scratch folders (journals that crash recovery replays:
+  /// `.just_changes` since just_core_cli 0.2.0, `.dart_tool` before) and
   /// the trash.
   static const Set<String> forbiddenFolders = {
     '.git',
     '.dart_tool',
+    '.just_changes',
     '.editor_trash',
     '.just_trash',
   };
 
   /// Files at the project's root a template may not write: what the store,
-  /// `just` and pub keep — the lockfile, the project's plugin permissions,
-  /// and pub's own files.
+  /// `just`, pub and Flutter keep — the lockfile, the project's plugin
+  /// permissions, pub's own files and Flutter's plugin lists (which the
+  /// store's `dart pub get` would leave as the template wrote them).
   static const Set<String> forbiddenFiles = {
     'just_store.lock.json',
     'just.json',
     'pubspec.lock',
     'pubspec_overrides.yaml',
     '.packages',
+    '.flutter-plugins',
+    '.flutter-plugins-dependencies',
   };
 
   /// The archive's `template/` files, by project path, with the text ones'
@@ -203,15 +213,17 @@ final class TemplateCommand extends StoreProjectCommand {
     String pubspec,
     StoreProject project,
   ) {
-    final name =
-        RegExp(
-          r'^name:\s*(\S+)',
-          multiLine: true,
-        ).firstMatch(pubspec)?.group(1) ??
-        'game';
+    final name = PubspecFields.name(pubspec) ?? 'game';
     final title = project.readProjectFile().title;
     final names = ProjectNames(name, title: title);
+    if (ProjectNames.titleProblem(names.title) case final problem?) {
+      throw CommandFailure(
+        'The project\'s title "${names.title}" cannot go into a template: '
+        '$problem',
+      );
+    }
     final out = <String, Uint8List>{};
+    final texts = <String, String>{};
     final refused = <String>[];
     for (final f in zip.files) {
       if (!f.path.startsWith('template/') || f.path.endsWith('/')) continue;
@@ -223,17 +235,18 @@ final class TemplateCommand extends StoreProjectCommand {
         continue;
       }
       final raw = zip.contentOf(f);
-      if (!FileHashes.isText(path)) {
+      if (FileHashes.isText(path)) {
+        texts[path] = utf8.decode(raw);
+      } else {
         out[path] = raw;
-        continue;
       }
-      final text = utf8
-          .decode(raw)
-          .replaceAll('{{name}}', names.name)
-          .replaceAll('{{title}}', names.title)
-          .replaceAll('{{App}}', names.app);
-      out[path] = Uint8List.fromList(utf8.encode(text));
     }
+    // Filled as `just create` fills its own: `{{title.dart}}`,
+    // `{{title.yaml}}`, `{{title.json}}`, `{{title.xml}}` and `{{title.c}}`
+    // escaped for where they go.
+    TemplateRenderer.render(texts, names: names).forEach(
+      (path, text) => out[path] = Uint8List.fromList(utf8.encode(text)),
+    );
     if (refused.isNotEmpty) {
       throw CommandFailure(
         'The template would write where the store, `just`, pub or git keep '

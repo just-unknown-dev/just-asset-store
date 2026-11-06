@@ -10,12 +10,13 @@
 /// **On every platform, the web included (JavaScript and WebAssembly):**
 /// - [StoreIndex], a catalog's `index.json`, with its [StoreItem]s and
 ///   their [StoreItemVersion]s; [ItemManifest], a package's
-///   `just_store.json`.
+///   `just_store.json`; [JustRelease], a release's `just_release.json`.
 /// - [PackageCheck]: the rules a downloaded package must pass, run on its
 ///   archive in memory.
-/// - [StoreLock], a project's `just_store.lock.json`; [StoreCodegen], the
-///   text of the registries the store generates; [storeBlock], the store's
-///   block in a pubspec, edited with [PubspecEditor].
+/// - [StoreLock], a project's `just_store.lock.json`, with the
+///   [FileHashes] it records; [StoreCodegen], the text of the registries
+///   the store generates; [storeBlock], the store's block in a pubspec,
+///   edited with [PubspecEditor].
 /// - From just_core_cli: [Version] and [VersionConstraint], [JsonFields],
 ///   [PackageNames], [Sha256], and [ZipArchive] and [ZipWriter] with
 ///   [SafePaths].
@@ -26,24 +27,22 @@
 /// [StoreProject], [StoreRestore] and [StoreLinker]; the creator tools
 /// [Packer] and [CatalogBuilder]; and [StoreCommand], the `just store`
 /// commands.
+///
+/// Each part is one folder of `lib/src`, exported whole by its barrel; the
+/// folders that need `dart:io` are exported only where there is one
+/// (`dart.library.js_interop` picks the empty `src/web.dart` instead).
 library;
 
-export 'src/archive/safe_paths.dart';
-export 'src/archive/zip_reader.dart';
-export 'src/archive/zip_writer.dart';
-export 'src/catalog/catalog_files.dart';
-export 'src/catalog/claim.dart';
-export 'src/catalog/item_manifest.dart';
-export 'src/catalog/json.dart';
-export 'src/catalog/names.dart';
-export 'src/catalog/semver.dart';
-export 'src/catalog/store_index.dart';
-export 'src/crypto/sha256.dart';
-export 'src/install/package_check.dart';
-export 'src/project/codegen.dart';
-export 'src/project/lockfile.dart';
-export 'src/project/pubspec_editor.dart';
+export 'src/catalog/catalog.dart';
+export 'src/checks/checks.dart';
+export 'src/lockfile/lockfile.dart';
 export 'src/version.dart';
 // The store on disk where there is a machine; nothing more on the web. The
-// native barrel is the default, so the analyzer and dartdoc see it.
-export 'src/native.dart' if (dart.library.js_interop) 'src/web.dart';
+// native barrels are the default, so the analyzer and dartdoc see them.
+export 'src/project/project.dart' if (dart.library.js_interop) 'src/web.dart';
+export 'src/sources/sources.dart' if (dart.library.js_interop) 'src/web.dart';
+export 'src/publishing/publishing.dart'
+    if (dart.library.js_interop) 'src/web.dart';
+export 'src/install/install.dart' if (dart.library.js_interop) 'src/web.dart';
+export 'src/store/store.dart' if (dart.library.js_interop) 'src/web.dart';
+export 'src/commands/commands.dart' if (dart.library.js_interop) 'src/web.dart';

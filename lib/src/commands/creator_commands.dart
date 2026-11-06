@@ -6,21 +6,23 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:just_core_cli/just_core_cli.dart';
+import 'package:meta/meta.dart';
 
 import '../catalog/catalog_files.dart';
-import '../catalog/claim.dart';
+import '../catalog/claim_code.dart';
 import '../catalog/item_manifest.dart';
-import '../catalog/json.dart';
-import '../catalog/store_index.dart';
-import '../install/package_check.dart';
+import '../catalog/just_release.dart';
+import '../catalog/store_item.dart';
+import '../checks/package_check.dart';
 import '../project/store_project.dart';
+import '../publishing/catalog_builder.dart';
+import '../publishing/packer.dart';
 import '../sources/downloader.dart';
 import '../sources/store_source.dart';
-import '../tools/catalog_builder.dart';
-import '../tools/packer.dart';
-import 'store_command.dart';
+import 'store_project_command.dart';
 
 /// `just store pack <folder>`.
+@internal
 final class PackCommand extends JustCommand {
   /// Packs an item into its archive and its catalog version file.
   PackCommand() {
@@ -121,9 +123,9 @@ final class PackCommand extends JustCommand {
     // file name (the manifest keeps the names apart).
     final pictures = [
       for (final path in result.manifest.previews)
-        File('${folder.path}/$path').copySync(
-          '${outDir.path}/${path.split('/').last}',
-        ),
+        File(
+          '${folder.path}/$path',
+        ).copySync('${outDir.path}/${path.split('/').last}'),
     ];
     output
       ..line('Packed ${result.manifest.name} ${result.manifest.version}:')
@@ -168,6 +170,7 @@ final class PackCommand extends JustCommand {
 }
 
 /// `just store validate <folder|zip>`.
+@internal
 final class ValidateCommand extends JustCommand {
   @override
   String get name => 'validate';
@@ -211,7 +214,7 @@ final class ValidateCommand extends JustCommand {
       (f) =>
           f.path.split('/').last == ItemManifest.fileName &&
           f.path.split('/').length <= 2,
-      orElse: () => throw StoreFormatException(
+      orElse: () => throw JsonFormatException(
         'No ${ItemManifest.fileName} in the archive.',
         file: path,
       ),
@@ -279,6 +282,7 @@ PackResult _pack(Directory folder, {String? excluding}) {
 }
 
 /// `just store index <build|check|codeowners> <repo>`.
+@internal
 final class IndexCommand extends JustCommand {
   /// Builds or checks a catalog from its repository.
   IndexCommand() {

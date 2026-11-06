@@ -2,9 +2,9 @@
 /// says about itself.
 library;
 
-import '../catalog/store_index.dart';
-import '../project/lockfile.dart';
-import 'planner.dart';
+import '../catalog/item_traits.dart';
+import '../lockfile/store_lock.dart';
+import 'store_catalog.dart';
 
 /// Where an item comes from, and so who stands behind it.
 enum ItemSource {

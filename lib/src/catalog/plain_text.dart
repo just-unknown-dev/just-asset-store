@@ -2,13 +2,15 @@
 /// editor shows.
 library;
 
-import 'json.dart';
+import 'package:just_core_cli/just_core_cli.dart';
+import 'package:meta/meta.dart';
 
 /// [value], the text at [key] of [json], when it is plain text; else a
-/// [StoreFormatException]. Plain text has no control characters (tabs
+/// [JsonFormatException]. Plain text has no control characters (tabs
 /// aside, and line breaks when [lines]), and none of the invisible marks
 /// that reorder what follows them: nothing that could move a terminal's
 /// cursor, or make a name read as another.
+@internal
 String plainText(
   JsonFields json,
   String key,
@@ -33,6 +35,7 @@ String plainText(
 }
 
 /// [plainText] of the optional [value].
+@internal
 String? optPlainText(
   JsonFields json,
   String key,

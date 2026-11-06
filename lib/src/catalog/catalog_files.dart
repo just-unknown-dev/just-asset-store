@@ -10,9 +10,10 @@ library;
 import 'dart:convert';
 import 'dart:typed_data';
 
-import '../crypto/sha256.dart';
-import 'json.dart';
+import 'package:just_core_cli/just_core_cli.dart';
+
 import 'store_index.dart';
+import 'store_item.dart';
 
 /// The bucket of [buckets] the item [id] belongs in: the first four bytes
 /// of its id's SHA-256, as a number, modulo [buckets]. It never changes, so
@@ -108,7 +109,7 @@ final class CatalogRoot {
   /// listing its items itself.
   static bool isSplit(JsonFields json) => json.has('pieces');
 
-  /// Reads one from [json]. Throws [StoreFormatException].
+  /// Reads one from [json]. Throws [JsonFormatException].
   factory CatalogRoot.fromJson(JsonFields json) {
     final schema = json.integer('schema', min: 2);
     if (schema > StoreIndex.currentSchema) {
@@ -129,7 +130,7 @@ final class CatalogRoot {
     final seen = <int>{};
     for (var i = 0; i < pieces.length; i++) {
       if (!seen.add(pieces[i].bucket)) {
-        throw StoreFormatException(
+        throw JsonFormatException(
           'Bucket ${pieces[i].bucket} is listed twice.',
           where: 'pieces[$i].bucket',
         );
@@ -147,7 +148,7 @@ final class CatalogRoot {
     );
   }
 
-  /// [text] parsed as a root. Throws [StoreFormatException].
+  /// [text] parsed as a root. Throws [JsonFormatException].
   factory CatalogRoot.parse(String text) =>
       CatalogRoot.fromJson(JsonFields.parse(text));
 
@@ -174,7 +175,7 @@ final class CatalogRoot {
 
   /// The catalog these [read] pieces make up: each must be one this root
   /// names, and every piece it names must be there. Throws
-  /// [StoreFormatException].
+  /// [JsonFormatException].
   StoreIndex assemble(List<CatalogPiece> read) {
     final byBucket = {for (final p in read) p.bucket: p};
     final items = <StoreItem>[];
@@ -183,12 +184,12 @@ final class CatalogRoot {
     for (final ref in pieces) {
       final piece = byBucket[ref.bucket];
       if (piece == null) {
-        throw StoreFormatException('Piece ${ref.path} is missing.');
+        throw JsonFormatException('Piece ${ref.path} is missing.');
       }
       for (var i = 0; i < piece.items.length; i++) {
         final item = piece.items[i];
         if (!known.contains(item.category)) {
-          throw StoreFormatException(
+          throw JsonFormatException(
             'Category "${item.category}" is not in index.json\'s '
             '"categories".',
             where: 'items[$i].category',
@@ -230,7 +231,7 @@ final class CatalogPiece {
 
   /// [bytes], the piece [ref] names in a root of [buckets] buckets: checked
   /// against [ref] — its size and SHA-256, its bucket, how many items it
-  /// lists, and that each belongs in it. Throws [StoreFormatException]
+  /// lists, and that each belongs in it. Throws [JsonFormatException]
   /// naming the piece's file.
   factory CatalogPiece.read(
     Uint8List bytes,
@@ -238,7 +239,7 @@ final class CatalogPiece {
     required int buckets,
   }) {
     if (bytes.length != ref.size || Sha256.hexOf(bytes) != ref.sha256) {
-      throw StoreFormatException(
+      throw JsonFormatException(
         'It is not the piece index.json names (its size or SHA-256 '
         'differs).',
         file: ref.path,
@@ -249,7 +250,7 @@ final class CatalogPiece {
       try {
         text = utf8.decode(bytes);
       } on FormatException {
-        throw const StoreFormatException('It is not UTF-8 text.');
+        throw const JsonFormatException('It is not UTF-8 text.');
       }
       final json = JsonFields.parse(text);
       final schema = json.integer('schema', min: 2);
@@ -270,14 +271,14 @@ final class CatalogPiece {
       }
       for (var i = 0; i < items.length; i++) {
         if (catalogBucket(items[i].id, buckets) != ref.bucket) {
-          throw StoreFormatException(
+          throw JsonFormatException(
             '"${items[i].id}" belongs in another bucket.',
             where: 'items[$i].id',
           );
         }
       }
       return CatalogPiece(ref.bucket, items, skipped: skipped);
-    } on StoreFormatException catch (e) {
+    } on JsonFormatException catch (e) {
       throw e.file == null ? e.inFile(ref.path) : e;
     }
   }
@@ -302,7 +303,7 @@ final class CatalogFiles {
   /// canonical JSON, and only the root says when it was made
   /// ([generatedAt], or [index]'s own).
   ///
-  /// Throws [StoreFormatException] when one bucket would make a piece over
+  /// Throws [JsonFormatException] when one bucket would make a piece over
   /// [CatalogRoot.maxPieceBytes]: use more buckets.
   factory CatalogFiles.of(
     StoreIndex index, {
@@ -328,7 +329,7 @@ final class CatalogFiles {
         }, pretty: false),
       );
       if (bytes.length > CatalogRoot.maxPieceBytes) {
-        throw StoreFormatException(
+        throw JsonFormatException(
           'Bucket $bucket would be ${bytes.length} bytes; use more than '
           '$buckets buckets.',
         );

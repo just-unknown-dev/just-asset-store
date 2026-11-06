@@ -2,12 +2,11 @@
 /// itself.
 library;
 
-import '../archive/safe_paths.dart';
-import 'json.dart';
-import 'names.dart';
+import 'package:just_core_cli/just_core_cli.dart';
+
+import 'item_details.dart';
+import 'item_traits.dart';
 import 'plain_text.dart';
-import 'semver.dart';
-import 'store_index.dart';
 
 /// An editor module the generated `store_modules.g.dart` creates.
 final class ModuleEntry {
@@ -114,7 +113,7 @@ final class ItemManifest {
   /// The newest manifest format this code reads.
   static const int currentSchema = 1;
 
-  /// Reads a manifest from [json]. Throws [StoreFormatException].
+  /// Reads a manifest from [json]. Throws [JsonFormatException].
   factory ItemManifest.fromJson(JsonFields json) {
     final schema = json.integer('schema', min: 1);
     if (schema > currentSchema) {
@@ -124,7 +123,7 @@ final class ItemManifest {
       );
     }
     final id = json.string('id');
-    final idProblem = StoreNames.idProblem(id);
+    final idProblem = PackageNames.idProblem(id);
     if (idProblem != null) throw json.error('id', idProblem);
     final kind = json.choice('kind', ItemKind.byId);
     if (kind == ItemKind.runtimeLibrary) {
@@ -134,7 +133,7 @@ final class ItemManifest {
       );
     }
     final category = json.string('category');
-    if (!StoreNames.isCategory(category)) {
+    if (!PackageNames.isCategory(category)) {
       throw json.error('category', '"$category" is not a category id.');
     }
 
@@ -173,7 +172,7 @@ final class ItemManifest {
     }
     final componentTypes = runtime?.strings('componentTypes') ?? const [];
     for (final type in componentTypes) {
-      if (!StoreNames.isDottedIdentifier(type)) {
+      if (!PackageNames.isDottedIdentifier(type)) {
         throw runtime!.error('componentTypes', '"$type" is not a type name.');
       }
     }
@@ -213,7 +212,7 @@ final class ItemManifest {
     for (var i = 0; i < permissionNames.length; i++) {
       final p = ItemPermission.byId[permissionNames[i]];
       if (p == null) {
-        throw StoreFormatException(
+        throw JsonFormatException(
           'Expected one of: ${ItemPermission.byId.keys.join(', ')}.',
           where: '${json.where.isEmpty ? '' : '${json.where}.'}permissions[$i]',
         );
@@ -223,7 +222,7 @@ final class ItemManifest {
     final stage = ItemStage.optFrom(json, 'stage');
     final replacedBy = json.optString('replacedBy');
     if (replacedBy != null) {
-      if (!StoreNames.isId(replacedBy) || replacedBy == id) {
+      if (!PackageNames.isId(replacedBy) || replacedBy == id) {
         throw json.error(
           'replacedBy',
           'Name the id of the item that replaces this one.',
@@ -268,7 +267,18 @@ final class ItemManifest {
       editorOnlyLibraries: editorOnly,
       extensions: extensions,
       componentTypes: componentTypes,
-      setupFile: setup?.optString('file'),
+      setupFile: switch (setup?.optString('file')) {
+        null => null,
+        final file when SafePaths.isSafe(file) => plainText(
+          setup!,
+          'file',
+          file,
+        ),
+        final file => throw setup!.error(
+          'file',
+          '"$file" is not a path inside the project.',
+        ),
+      },
       setupSnippet: setup == null
           ? null
           : optPlainText(
@@ -284,7 +294,7 @@ final class ItemManifest {
     );
   }
 
-  /// [text] parsed as a manifest. Throws [StoreFormatException].
+  /// [text] parsed as a manifest. Throws [JsonFormatException].
   factory ItemManifest.parse(String text) =>
       ItemManifest.fromJson(JsonFields.parse(text));
 
@@ -349,7 +359,9 @@ final class ItemManifest {
   /// scenes that would stop loading.
   final List<String> componentTypes;
 
-  /// Where its hand-written setup goes, like `lib/game/boot/game_boot.dart`.
+  /// Where its hand-written setup goes in the game, like
+  /// `lib/game/boot/game_boot.dart`: a plain path inside the project. The
+  /// store shows it with [setupSnippet]; it never writes there.
   final String? setupFile;
 
   /// The setup code the store shows after installing it, for what can't be
@@ -443,7 +455,7 @@ String _library(JsonFields json, String id) {
 
 String _identifier(JsonFields json, String key) {
   final text = json.string(key);
-  if (!StoreNames.isDottedIdentifier(text)) {
+  if (!PackageNames.isDottedIdentifier(text)) {
     throw json.error(key, '"$text" is not a Dart name.');
   }
   return text;

@@ -19,7 +19,7 @@ concurrency:
 
 env:
   # The store tool, at a version that never moves under this workflow.
-  STORE_VERSION: 0.1.0
+  STORE_VERSION: 0.3.0
 
 jobs:
   publish:

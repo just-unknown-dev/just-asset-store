@@ -103,8 +103,9 @@ class FakePub implements PubRunner {
 }
 
 /// Every file under [dir] (the project), by relative path, except the
-/// store's scratch folder and the trash: what must come back byte for byte
-/// after a rollback.
+/// tools' scratch folders (just_core_cli's `.just_changes`, and where 0.1
+/// kept it) and the trash: what must come back byte for byte after a
+/// rollback.
 Map<String, Uint8List> snapshot(Directory dir) {
   final out = <String, Uint8List>{};
   final base = dir.absolute.path.replaceAll(r'\', '/');
@@ -113,6 +114,7 @@ Map<String, Uint8List> snapshot(Directory dir) {
         .replaceAll(r'\', '/')
         .substring(base.length + 1);
     if (rel.startsWith('.dart_tool/just_core_cli') ||
+        rel.startsWith('.just_changes/') ||
         rel.startsWith('.editor_trash')) {
       continue;
     }
