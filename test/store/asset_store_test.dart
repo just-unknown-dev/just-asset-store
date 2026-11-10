@@ -51,7 +51,7 @@ void main() {
         ),
       ]);
       dir = tempDir('p');
-      writeFiles(dir, {'pubspec.yaml': pubspecOf('app')});
+      writeFiles(dir, {'pubspec.yaml': pubspecOf('app'), ...resolvedProject()});
       store = AssetStore(
         project: StoreProject(dir.path),
         sources: [SourceConfig(source.indexUri.toFilePath())],

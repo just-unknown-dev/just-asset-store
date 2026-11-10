@@ -418,13 +418,13 @@ void main() {
     },
   );
 
-  test('a blocked plan exits 1 and says why', () async {
+  test('a blocked plan fails, saying why, and changes nothing', () async {
     final source = buildCatalog(tempDir('catalog'), [
       TestItem('just_art_paid', access: 'entitled'),
     ]);
     final project = tempDir('proj');
     writeFiles(project, {'pubspec.yaml': pubspecOf('app')});
-    final (code, out, _) = await store([
+    final (code, _, err) = await store([
       'install',
       'just_art_paid',
       '--project',
@@ -433,7 +433,73 @@ void main() {
       source.indexUri.toFilePath(),
     ]);
     expect(code, 1);
-    expect(out, contains('x Just Art Paid is a paid item'));
+    expect(err, contains('Nothing was changed: Just Art Paid is a paid item'));
+  });
+
+  test('a plugin made for another engine or editor is refused, and info and '
+      'search say which versions fit', () async {
+    final dir = tempDir('catalog');
+    buildCatalog(dir, [
+      TestItem(
+        'just_kit',
+        kind: ItemKind.kit,
+        category: 'kits',
+        versions: ['1.0.0', '2.0.0'],
+      ),
+    ]);
+    // 2.0.0 is made for engine 3.
+    final file = File('${dir.path}/index.json');
+    final json = jsonDecode(file.readAsStringSync()) as Map<String, Object?>;
+    final versions =
+        ((json['items'] as List).single as Map)['versions'] as List;
+    (versions.last as Map)['requires'] = {
+      ...hostRanges,
+      'just_game_engine': '^3.0.0',
+    };
+    file.writeAsStringSync(jsonEncode(json));
+    final project = tempDir('proj');
+    writeFiles(project, {
+      'pubspec.yaml': pubspecOf('app'),
+      ...resolvedProject(),
+    });
+    final args = ['--project', project.path, '--source', file.path];
+
+    var (code, out, err) = await store([
+      'install',
+      'just_kit@2.0.0',
+      '--yes',
+      ...args,
+    ]);
+    expect(code, 1);
+    expect(
+      err,
+      contains(
+        'Nothing was changed: Just Kit 2.0.0 needs Just Game Engine ^3.0.0; '
+        'this project has 2.1.3.',
+      ),
+    );
+    expect(Directory('${project.path}/plugins').existsSync(), isFalse);
+
+    (code, out, err) = await store(['info', 'just_kit', ...args]);
+    expect(code, 0, reason: err);
+    expect(out, contains('this project: engine 2.1.3, editor 0.2.0'));
+    expect(
+      out,
+      contains('2.0.0  engine ^3.0.0, editor ^0.2.0  (not for this project)'),
+    );
+    expect(out, contains('1.0.0  engine ^2.1.0, editor ^0.2.0\n'));
+    expect(out, contains('1.0.0 is the newest for this project.'));
+
+    (code, out, err) = await store(['search', 'kit', ...args]);
+    expect(code, 0, reason: err);
+    expect(out, contains('just_kit 1.0.0  Just Kit'));
+
+    // Without pub get, the store can't tell: it says so, and installs
+    // nothing.
+    Directory('${project.path}/.dart_tool').deleteSync(recursive: true);
+    (code, out, err) = await store(['install', 'just_kit', '--yes', ...args]);
+    expect(code, 1);
+    expect(err, contains('run pub get in it first'));
   });
 
   test('index codeowners and check', () async {
@@ -530,8 +596,7 @@ void main() {
     // Without --source, from another folder: the lockfile's catalog is
     // found, but its "official" item is a community one now, and its
     // reserved name is not its to use.
-    String out;
-    (code, out, err) = await store([
+    (code, _, err) = await store([
       'update',
       'just_art_knight',
       '--yes',
@@ -539,7 +604,7 @@ void main() {
       project.path,
     ], cwd: tempDir('elsewhere').path);
     expect(code, 1);
-    expect(out, contains("only the store's own team"));
+    expect(err, contains("only the store's own team"));
   });
 
   test('search, info and vendor', () async {

@@ -67,7 +67,7 @@ void main() {
     ]);
     final project = tempDir('proj');
     writeFiles(project, {'pubspec.yaml': pubspecOf('rocket_run')});
-    final (code, out, _) = await store([
+    final (code, _, err) = await store([
       'template',
       'starter_game',
       '--project',
@@ -76,7 +76,7 @@ void main() {
       source.indexUri.toFilePath(),
     ]);
     expect(code, 1);
-    expect(out, contains('"just_gone" (needed by you) is not in any'));
+    expect(err, contains('"just_gone" (needed by you) is not in any'));
     expect(File('${project.path}/lib/main.dart').existsSync(), isFalse);
   });
 

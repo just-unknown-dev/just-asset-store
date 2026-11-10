@@ -7,6 +7,7 @@ import 'dart:io';
 import 'package:just_core_cli/project.dart';
 
 import '../catalog/item_traits.dart';
+import '../catalog/requirements.dart';
 import '../catalog/reserved_names.dart';
 import '../catalog/store_item.dart';
 import '../lockfile/store_lock.dart';
@@ -72,7 +73,12 @@ final class Planner {
           IssueLevel.info,
           withdrawn
               ? '${_name(id)} is no longer offered; $installed stays.'
-              : '${_name(id)} $installed is the newest available.',
+              : switch (_heldBack(id)) {
+                  final why? =>
+                    '${_name(id)} $installed is the newest version for this '
+                        "project's engine and editor. $why",
+                  null => '${_name(id)} $installed is the newest available.',
+                },
           id: id,
         ),
       ]);
@@ -106,6 +112,14 @@ final class Planner {
       }
       if (_newerThanInstalled(e.key) != null) {
         targets[e.key] = _floor(installed);
+      } else if (_heldBack(e.key) case final why?) {
+        notes.add(
+          PlanIssue(
+            IssueLevel.info,
+            '${item.name} $installed stays: $why',
+            id: e.key,
+          ),
+        );
       }
     }
     if (targets.isEmpty) return _finish(const [], notes);
@@ -114,28 +128,76 @@ final class Planner {
   }
 
   /// The newest available version of the installed [id] that is newer
-  /// than what is installed, or null.
+  /// than what is installed and fits the project, or null.
   Version? _newerThanInstalled(String id) {
     final installed = state.installedVersion(id);
     final item = catalog.entry(id)?.item;
     if (installed == null || item == null || item.unavailable) return null;
     return _floor(installed).bestOf([
       for (final v in item.available)
-        if (v.version > installed) v.version,
+        if (v.version > installed && _versions.fits(item, v)) v.version,
     ]);
+  }
+
+  /// Why the installed [id] can't move to its newest version, when that is
+  /// newer than what is installed and made for another engine or editor.
+  String? _heldBack(String id) {
+    final installed = state.installedVersion(id);
+    final item = catalog.entry(id)?.item;
+    final latest = item?.latest;
+    if (installed == null || latest == null || latest.version <= installed) {
+      return null;
+    }
+    return _versions.problemWith(item!, latest);
   }
 
   /// [installed] or newer.
   static VersionConstraint _floor(Version installed) =>
       VersionConstraint.parse('>=$installed');
 
-  /// The newest version of [id] a plain update would pick, when newer than
-  /// what is installed.
+  ProjectVersions get _versions => state.versions;
+
+  /// The newest version of [id] a plain update would pick — one made for
+  /// the project's engine and editor — when newer than what is installed.
   StoreItemVersion? availableUpdate(String id) {
     final installed = state.installedVersion(id);
-    final latest = catalog.entry(id)?.item.latest;
-    if (installed == null || latest == null) return null;
-    return latest.version > installed ? latest : null;
+    final best = pick(id);
+    if (installed == null || best == null) return null;
+    return best.version > installed ? best : null;
+  }
+
+  /// The versions of [id] this project can install — those made for its
+  /// engine and editor ([ProjectVersions.fits]) — newest first.
+  List<StoreItemVersion> versionsFor(String id) {
+    final item = catalog.entry(id)?.item;
+    if (item == null) return const [];
+    return [
+      for (final v in item.available)
+        if (_versions.fits(item, v)) v,
+    ]..sort((a, b) => b.version.compareTo(a.version));
+  }
+
+  /// The version of [id] a plain install picks: the newest made for the
+  /// project's engine and editor, releases first. Null when none is.
+  StoreItemVersion? pick(String id) {
+    final item = catalog.entry(id)?.item;
+    return item?.newest((v) => _versions.fits(item, v));
+  }
+
+  /// Why [version] of [id] can't go into the project, in a sentence; null
+  /// when it can.
+  String? problemWith(String id, StoreItemVersion version) {
+    final item = catalog.entry(id)?.item;
+    return item == null ? null : _versions.problemWith(item, version);
+  }
+
+  /// Why the newest version of [id] can't go into the project, when it
+  /// can't: made for another engine or editor. Null when it can, or when
+  /// nothing is available.
+  String? newestProblem(String id) {
+    final item = catalog.entry(id)?.item;
+    final latest = item?.latest;
+    return latest == null ? null : _versions.problemWith(item!, latest);
   }
 
   /// The installed items the store took down (malware, a stolen asset), and
@@ -476,19 +538,11 @@ final class Planner {
         ),
       );
     }
-    v.requires.forEach((name, constraint) {
-      final have = state.environment[name];
-      if (have != null && !constraint.allows(have)) {
-        issues.add(
-          PlanIssue(
-            IssueLevel.blocker,
-            '${item.name} ${v.version} needs ${_requirement(name)} '
-            '$constraint; this project has $have.',
-            id: id,
-          ),
-        );
-      }
-    });
+    // The resolver picks only versions made for the project's engine and
+    // editor; this says so again for a plan built some other way.
+    if (_versions.problemWith(item, v) case final why?) {
+      issues.add(PlanIssue(IssueLevel.blocker, why, id: id));
+    }
     if (change.current == null) {
       if (state.graph == null && !item.isOfficial && item.kind.isVendored) {
         // Without it the store can't tell whether the project already
@@ -636,10 +690,4 @@ final class Planner {
 
   String _name(String id) =>
       catalog.entry(id)?.item.name ?? state.manifests[id]?.name ?? id;
-
-  static String _requirement(String key) => switch (key) {
-    'sdk' => 'Dart',
-    'flutter' => 'Flutter',
-    _ => key,
-  };
 }

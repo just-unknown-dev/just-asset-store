@@ -13,7 +13,7 @@ class TestItem {
     this.versions = const ['1.0.0'],
     this.files = const {},
     this.dependencies = const {},
-    this.requires = const {},
+    Map<String, String>? requires,
     this.modules = const [],
     this.extensions = const [],
     this.nativePlugins = const [],
@@ -26,7 +26,8 @@ class TestItem {
     this.replacedBy,
     this.previews = const [],
     this.mutate,
-  }) : permissions =
+  }) : requires = requires ?? (kind.isPlugin ? hostRanges : const {}),
+       permissions =
            permissions ?? (nativePlugins.isEmpty ? const [] : const ['native']),
        // Every plugin names one.
        stage = stage ?? (kind.isPlugin ? 'beta' : null);
@@ -40,6 +41,9 @@ class TestItem {
   /// Content defaults to one sprite pair in `sprites/`.
   final Map<String, String> files;
   final Map<String, String> dependencies;
+
+  /// What it needs of the project: for a plugin, unless given, the engine
+  /// and editor ranges of [hostRanges], which [testHost] meets.
   final Map<String, String> requires;
   final List<String> modules;
   final List<String> extensions;
@@ -65,6 +69,55 @@ class TestItem {
   /// Changes a version's files before zipping, to make a bad package.
   final void Function(String version, Map<String, List<int>> files)? mutate;
 }
+
+/// The engine and editor ranges every test plugin names unless told
+/// otherwise: [testHost] is in both.
+const Map<String, String> hostRanges = {
+  Requirements.engine: '^2.1.0',
+  Requirements.editor: '^0.2.0',
+};
+
+/// [hostRanges] as a catalog version's `requires`.
+final Map<String, VersionConstraint> hostRequires = {
+  for (final e in hostRanges.entries) e.key: VersionConstraint.parse(e.value),
+};
+
+/// The engine and editor of a test project: in [hostRanges].
+final Map<String, Version> testHost = {
+  Requirements.engine: Version(2, 1, 3),
+  Requirements.editor: Version(0, 2, 0),
+};
+
+/// A `.dart_tool/package_graph.json` for a project named [root] that pub
+/// resolved with [testHost]'s engine and editor (or [engine] / [editor]
+/// instead), for [writeFiles]-style maps.
+Map<String, String> resolvedProject({
+  String root = 'app',
+  String? engine,
+  String? editor,
+}) => {
+  '.dart_tool/package_graph.json': jsonEncode({
+    'roots': [root],
+    'packages': [
+      {
+        'name': root,
+        'version': '1.0.0',
+        'dependencies': [Requirements.engine],
+        'devDependencies': [Requirements.editor],
+      },
+      {
+        'name': Requirements.engine,
+        'version': engine ?? '${testHost[Requirements.engine]}',
+        'dependencies': <String>[],
+      },
+      {
+        'name': Requirements.editor,
+        'version': editor ?? '${testHost[Requirements.editor]}',
+        'dependencies': <String>[],
+      },
+    ],
+  }),
+};
 
 /// The files of [item] at [version], as the packer would make them.
 Map<String, List<int>> packageFiles(TestItem item, String version) {
@@ -110,6 +163,7 @@ Map<String, List<int>> packageFiles(TestItem item, String version) {
     'kind': item.kind.id,
     'category': item.category,
     'dependencies': item.dependencies,
+    if (item.requires.isNotEmpty) 'requires': item.requires,
     if (item.permissions.isNotEmpty) 'permissions': item.permissions,
     'stage': ?item.stage,
     'replacedBy': ?item.replacedBy,

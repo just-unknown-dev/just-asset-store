@@ -205,6 +205,7 @@ abstract final class Packer {
       versions: [
         StoreItemVersion(
           version: manifest.version,
+          requires: manifest.requires,
           dependencies: manifest.dependencies,
           pubDependencies: {
             for (final e in fromPub.entries)

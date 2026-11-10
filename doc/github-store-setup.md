@@ -188,7 +188,7 @@ items/my_sprite_tool/
 | `license.attribution` | Shown to everyone who installs the item. Use it whenever the licence asks for credit. |
 | `trust` | Don't write it. Trust comes from the publisher's file. |
 
-**Version files.** Use the release's `.json` as it is: it has the URL, `sha256` and size, plus `requires` and `dependencies` from the manifest, which must stay equal to the manifest's. Add these yourself when they apply:
+**Version files.** Use the release's `.json` as it is: it has the URL, `sha256` and size, plus `requires` and `dependencies` from the manifest, which must stay equal to the manifest's. For an editor tool or a kit, `requires` gives the `just_game_engine` and `just_game_engine_editor` ranges it works with, each with an upper limit: the store installs that version only into projects whose engine and editor are in them, and the check refuses a plugin version without them. Add these yourself when they apply:
 
 - `"nativePlugins": ["file_selector"]` when the package brings Flutter plugins (or packages with build hooks). `just store pack` writes them when run after `pub get`, leaving out what the project has anyway through `requires` and the store items it needs; add any it couldn't see. The store warns about them before installing, and refuses them unless the package's `just_store.json` declares `"permissions": ["native"]`.
 - `"notes": "What changed"`, shown in the details pane.

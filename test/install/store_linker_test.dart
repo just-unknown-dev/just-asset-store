@@ -21,6 +21,7 @@ Directory project({String extra = ''}) {
           'dependencies:\n  just_tool: ^1.0.0\n  just_game_engine: ^1.0.0\n'
           'dev_dependencies:\n  just_game_engine_editor: ^0.1.0\n$extra',
     ),
+    ...resolvedProject(),
     // A developer's checkout of a store item, with what a checkout has.
     'dev/just_tool/pubspec.yaml': pubspecOf('just_tool', version: '1.2.0'),
     'dev/just_tool/just_store.json': jsonEncode({
@@ -31,6 +32,7 @@ Directory project({String extra = ''}) {
       'kind': 'editor-extension',
       'stage': 'beta',
       'category': 'editors',
+      'requires': hostRanges,
       'editor': {
         'modules': [
           {'library': 'package:just_tool/editor.dart', 'class': 'ToolModule'},

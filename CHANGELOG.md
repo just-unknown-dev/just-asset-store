@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.0
+
+Every plugin says which engine and editor versions it works with, and the store installs it only where both fit — in the editor and from `just store` alike. Requires just_core_cli ^0.3.0 (tool set 2026.11.2).
+
+### Breaking
+
+- **Every plugin version names an engine range and an editor range.** An editor extension or kit's `just_store.json` `requires` must give `just_game_engine` and `just_game_engine_editor`, each with an upper limit (`^2.1.0`, `>=2.1.0 <3.0.0`; not `>=2.1.0` or `any`). `pack`, `validate`, the catalog's checks and the installer refuse one that doesn't. The editor's own parts (`"system": true`) are exempt.
+- **`requires` names only what the store checks:** `just_game_engine`, `just_game_engine_editor`, `flutter`, `sdk`. Any other name is refused when publishing, and a version that needs one is never installed.
+- **The manifest's `requires` must equal the catalog's**, as `dependencies` already had to, and a range may be no wider than the package's pubspec allows for that package.
+- **Only versions that fit are installed.** A version made for another engine or editor than the project resolved is never picked: a plain install takes the newest that fits (going back to an older version of an item when a dependency's newest doesn't fit), and asking for one that doesn't is a blocker naming both versions: "Platformer Kit 0.3.0-beta.1 needs Just Game Engine ^2.1.0; this project has 2.0.3." Before, a newer version that didn't fit was only ranked below those that did.
+- **A plugin is never installed where the store can't tell the engine or the editor**: before `pub get`, the blocker says to run it. Flutter and Dart the store can't see are still left to pub.
+- **`StoreInstaller.apply` checks again**, against the versions the project resolved just then, and refuses (`InstallFailureState.untouched`) any change whose version doesn't fit — whoever made the plan.
+- **`just store` fails on a blocked plan**: the blockers are the command's error (stderr, exit code 1, "Nothing was changed: …"), no longer `x` lines in the plan.
+- **Updates offer only versions that fit.** `Planner.availableUpdate` is the newest that fits; `update` and `updateAll` say what holds back a newer version that doesn't.
+
+### Added
+
+- `Requirements`: the names `requires` may use, their labels, `problems(requires, kind, system:)` (what publishing refuses) and `within`.
+- `ProjectVersions`: the engine, editor, Flutter and Dart a project runs, with `fits`, `meets` and `problemWith(item, version)`. `ProjectState.versions`, `ProjectState.resolved` and `ProjectState.readVersions(project)`.
+- `Planner.versionsFor(id)`, `pick(id)`, `problemWith(id, version)` and `newestProblem(id)`, for a store window to show only what fits, and why the rest doesn't.
+- `StoreItem.newest([where])`.
+- `just store info` gives each version's engine and editor range, the project's own, and marks those "not for this project"; `just store search` shows the newest version that fits. Both add `fits` to `--json` (and `info`, `compatible`).
+
+### Fixed
+
+- `just store pack` checked the archive against a version without its `requires`.
+
 ## 0.3.0
 
 The store's own layout, redirects that can't lead inside, installs that keep the editor drawing, and edits that are never lost without a word. Requires just_core_cli ^0.2.0.

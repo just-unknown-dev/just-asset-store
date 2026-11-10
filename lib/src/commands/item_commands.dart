@@ -6,6 +6,7 @@ import 'package:just_core_cli/just_core_cli.dart';
 import 'package:meta/meta.dart';
 
 import '../catalog/item_traits.dart';
+import '../catalog/requirements.dart';
 import '../install/item_source.dart';
 import '../sources/store_source.dart';
 import '../store/asset_store.dart';
@@ -217,6 +218,7 @@ final class SearchCommand extends StoreProjectCommand {
     final project = storeProject;
     final store = storeFor(project);
     final loaded = await loadCatalog(store);
+    final planner = await store.planner(catalog: loaded.catalog);
     final installed = project.readLock().items;
     final found = [
       for (final e in loaded.catalog.entries)
@@ -232,6 +234,11 @@ final class SearchCommand extends StoreProjectCommand {
           'kind': e.item.kind.id,
           'category': e.item.category,
           'latest': e.item.latest == null ? null : '${e.item.latest!.version}',
+          // The newest made for this project's engine and editor.
+          'fits': switch (planner.pick(e.item.id)) {
+            final v? => '${v.version}',
+            null => null,
+          },
           'summary': e.item.summary,
           'trust': e.item.trust.name,
           'source': e.sourceId,
@@ -248,9 +255,15 @@ final class SearchCommand extends StoreProjectCommand {
     for (final e in found) {
       final item = e.item;
       final mark = installed.containsKey(item.id) ? '*' : ' ';
-      final latest = item.latest == null ? '' : ' ${item.latest!.version}';
+      // The version an install would pick; the newest, marked, when none is
+      // made for this project's engine and editor.
+      final fits = planner.pick(item.id);
+      final shown = fits ?? item.latest;
+      final version = shown == null
+          ? ''
+          : ' ${shown.version}${fits == null ? ' (not for this project)' : ''}';
       output.line(
-        '$mark ${item.id}$latest  ${item.name} — ${item.kind.id}, '
+        '$mark ${item.id}$version  ${item.name} — ${item.kind.id}, '
         '${item.category} · ${tags(e, installed[item.id])}',
       );
       if (item.summary.isNotEmpty) output.line('    ${item.summary}');
@@ -291,12 +304,17 @@ final class InfoCommand extends StoreProjectCommand {
     final entry = loaded.catalog.entry(id);
     if (entry == null) throw CommandFailure('No item "$id" in the catalogs.');
     final item = entry.item;
+    final planner = await store.planner(catalog: loaded.catalog);
+    final fits = planner.pick(id);
     output.result = {
       ...item.toJson(),
       'source': entry.sourceId,
       'from': ItemSource.of(entry: entry, installed: installed).id,
       'stage': item.stage?.id,
       'installed': installed?.toJson(),
+      // What this project's engine and editor allow.
+      'fits': fits == null ? null : '${fits.version}',
+      'compatible': [for (final v in planner.versionsFor(id)) '${v.version}'],
     };
     output
       ..line('${item.name} (${item.id})')
@@ -323,14 +341,39 @@ final class InfoCommand extends StoreProjectCommand {
         '  ${latest.version} ${ItemPermission.describe(latest.permissions)}.',
       );
     }
+    if (item.latest != null && fits == null) {
+      output.warn(
+        'No version is made for this project: ${planner.newestProblem(id)}',
+      );
+    } else if (planner.newestProblem(id) case final why?) {
+      output.line('  ${fits!.version} is the newest for this project. $why');
+    }
+    // What the ranges are checked against.
+    if (item.kind.isPlugin) {
+      final have = planner.state.versions;
+      output.line(
+        '  this project: ${[for (final n in Requirements.forPlugins) '${_short(n)} ${have[n] ?? 'unknown'}'].join(', ')}',
+      );
+    }
     output.line('  versions:');
     for (final v in item.versions.reversed) {
+      final ranges = [
+        for (final n in Requirements.forPlugins)
+          if (v.requires[n] case final c?) '${_short(n)} $c',
+      ];
       final marks = [
         if (installed?.version == '${v.version}') 'installed',
-        if (v.blocked) 'taken down' else if (v.yanked) 'withdrawn',
+        if (v.blocked)
+          'taken down'
+        else if (v.yanked)
+          'withdrawn'
+        else if (planner.problemWith(id, v) != null)
+          'not for this project',
       ];
       output.line(
-        '    ${v.version}${marks.isEmpty ? '' : '  (${marks.join(', ')})'}',
+        '    ${v.version}'
+        '${ranges.isEmpty ? '' : '  ${ranges.join(', ')}'}'
+        '${marks.isEmpty ? '' : '  (${marks.join(', ')})'}',
       );
     }
     final running = installed == null
@@ -346,4 +389,11 @@ final class InfoCommand extends StoreProjectCommand {
     }
     return 0;
   }
+
+  /// [name], a [Requirements] name, in a word.
+  static String _short(String name) => switch (name) {
+    Requirements.engine => 'engine',
+    Requirements.editor => 'editor',
+    _ => Requirements.label(name),
+  };
 }

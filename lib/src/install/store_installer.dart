@@ -8,6 +8,7 @@ import 'package:just_core_cli/project.dart';
 import 'package:meta/meta.dart';
 
 import '../catalog/item_traits.dart';
+import '../catalog/requirements.dart';
 import '../checks/package_check.dart';
 import '../lockfile/store_block.dart';
 import '../lockfile/store_lock.dart';
@@ -17,6 +18,7 @@ import '../sources/downloader.dart';
 import '../sources/store_source.dart';
 import 'checked_archive.dart';
 import 'install_plan.dart';
+import 'project_state.dart';
 
 /// A step of an install, as shown to the user.
 final class InstallProgress {
@@ -188,7 +190,9 @@ final class StoreInstaller {
 
   /// Applies [plan]. Throws [InstallFailure] (with everything put back),
   /// or [CancelledException] when [cancel] fires before the project is
-  /// touched.
+  /// touched. A plan with blockers is refused, and so is one that installs
+  /// a version made for another engine or editor than the project runs now
+  /// ([ProjectVersions.problemWith]), before anything is downloaded.
   ///
   /// [replacing] names packages whose hand-written pubspec entries the store
   /// may take over (`just store vendor`); any other clash is refused.
@@ -213,6 +217,18 @@ final class StoreInstaller {
             : 'There is nothing to do.',
         state: InstallFailureState.untouched,
       );
+    }
+    // What the project runs now, not when the plan was made: a version
+    // made for another engine or editor never goes in, whoever made the
+    // plan.
+    final versions = ProjectState.readVersions(project);
+    for (final c in plan.changes) {
+      final v = c.version;
+      if (v == null || c.entry == null) continue;
+      if (c.kind != ChangeKind.install && c.kind != ChangeKind.update) continue;
+      if (versions.problemWith(c.entry!.item, v) case final why?) {
+        throw InstallFailure(why, state: InstallFailureState.untouched);
+      }
     }
     void report(String message, [double? fraction]) =>
         onProgress?.call(InstallProgress(message, fraction: fraction));

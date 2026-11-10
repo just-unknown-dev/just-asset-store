@@ -143,12 +143,7 @@ final class TemplateCommand extends StoreProjectCommand {
     );
     printPlan(plan);
     output.result = {...planJson(plan), 'template': item.id};
-    if (plan.blockers.isNotEmpty) {
-      throw CommandFailure(
-        '${item.name} needs items that cannot be installed, so nothing was '
-        'changed.',
-      );
-    }
+    refuseBlocked(plan);
     if (!confirm('Apply?')) return 1;
 
     final result = await storeFailures(

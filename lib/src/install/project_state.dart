@@ -6,6 +6,7 @@ import 'dart:io';
 import 'package:just_core_cli/project.dart';
 
 import '../catalog/item_manifest.dart';
+import '../catalog/requirements.dart';
 import '../lockfile/store_block.dart';
 import '../lockfile/store_lock.dart';
 import '../project/store_project.dart';
@@ -19,6 +20,7 @@ final class ProjectState {
     this.foreignOverrides = const {},
     this.graph,
     this.environment = const {},
+    this.resolved = true,
     this.existingFolders = const {},
   });
 
@@ -52,22 +54,7 @@ final class ProjectState {
       }
     }
     final graph = PackageGraph.read(project.root);
-    final config = PackageConfig.read(project.root);
-    final env = <String, Version>{};
-    for (final name in const ['just_game_engine', 'just_game_engine_editor']) {
-      final v = graph?.versionOf(name);
-      if (v != null) env[name] = v;
-    }
-    final flutter = Version.tryParse(config?.flutterVersion ?? '');
-    if (flutter != null) env['flutter'] = flutter;
-    final root = config?.flutterRoot;
-    if (root != null) {
-      final file = File('$root/bin/cache/dart-sdk/version');
-      final dart = file.existsSync()
-          ? Version.tryParse(file.readAsStringSync().trim())
-          : null;
-      if (dart != null) env['sdk'] = dart;
-    }
+    final versions = _versionsOf(project, graph);
     final folders = <String>{};
     for (final root in StoreProject.itemRoots) {
       final dir = project.dir(root);
@@ -84,9 +71,38 @@ final class ProjectState {
       manifests: manifests,
       foreignOverrides: foreign,
       graph: graph,
-      environment: env,
+      environment: versions.versions,
+      resolved: versions.resolved,
       existingFolders: folders,
     );
+  }
+
+  /// The versions [project] runs now, as pub resolved them last: what the
+  /// installer checks again just before it changes anything.
+  static ProjectVersions readVersions(StoreProject project) =>
+      _versionsOf(project, PackageGraph.read(project.root));
+
+  static ProjectVersions _versionsOf(
+    StoreProject project,
+    PackageGraph? graph,
+  ) {
+    final config = PackageConfig.read(project.root);
+    final env = <String, Version>{};
+    for (final name in Requirements.forPlugins) {
+      final v = graph?.versionOf(name);
+      if (v != null) env[name] = v;
+    }
+    final flutter = Version.tryParse(config?.flutterVersion ?? '');
+    if (flutter != null) env[Requirements.flutter] = flutter;
+    final root = config?.flutterRoot;
+    if (root != null) {
+      final file = File('$root/bin/cache/dart-sdk/version');
+      final dart = file.existsSync()
+          ? Version.tryParse(file.readAsStringSync().trim())
+          : null;
+      if (dart != null) env[Requirements.dart] = dart;
+    }
+    return ProjectVersions(env, resolved: graph != null);
   }
 
   /// The lockfile.
@@ -105,6 +121,14 @@ final class ProjectState {
   /// The versions `requires` is checked against: `sdk` (Dart), `flutter`,
   /// `just_game_engine`, `just_game_engine_editor`.
   final Map<String, Version> environment;
+
+  /// Whether the project's packages were resolved (pub get ran), so an
+  /// engine or editor missing from [environment] is one it doesn't have.
+  final bool resolved;
+
+  /// [environment], to check versions against.
+  ProjectVersions get versions =>
+      ProjectVersions(environment, resolved: resolved);
 
   /// The `packages/{category}/{name}` and `plugins/{category}/{name}`
   /// folders that exist ([StoreProject.itemRoots]).

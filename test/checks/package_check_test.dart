@@ -22,6 +22,10 @@ StoreItem catalogItem(
     StoreItemVersion(
       version: Version.parse(t.versions.first),
       archive: const StoreArchive(url: 'a.zip', sha256: '', size: 1),
+      requires: {
+        for (final e in t.requires.entries)
+          e.key: VersionConstraint.parse(e.value),
+      },
       pubDependencies: {
         for (final e in t.pubDependencies.entries)
           e.key: VersionConstraint.parse(e.value),
@@ -561,6 +565,122 @@ void main() {
     );
     // Content names none, and needs none.
     expect(check(TestItem('just_art_knight')).manifest.stage, isNull);
+  });
+
+  group('every plugin names the engine and editor versions it works with', () {
+    void Function(Map<String, List<int>>) manifest(
+      void Function(Map<String, Object?> m) edit,
+    ) => (f) {
+      final m =
+          jsonDecode(utf8.decode(f['just_store.json']!))
+              as Map<String, Object?>;
+      edit(m);
+      f['just_store.json'] = utf8.encode(jsonEncode(m));
+    };
+
+    test('both ranges, each with an upper limit', () {
+      final kit = TestItem('their_kit', kind: ItemKind.kit, category: 'kits');
+      expect(check(kit).manifest.requires.keys, [
+        'just_game_engine',
+        'just_game_engine_editor',
+      ]);
+      final none = TestItem(
+        'their_tool',
+        kind: ItemKind.editorExtension,
+        category: 'editors',
+        requires: const {},
+      );
+      expect(
+        () => check(none),
+        allOf(
+          refused('gives no range for just_game_engine:'),
+          refused('gives no range for just_game_engine_editor:'),
+        ),
+      );
+      final open = TestItem(
+        'their_kit',
+        kind: ItemKind.kit,
+        category: 'kits',
+        requires: {...hostRanges, 'just_game_engine': '>=2.1.0'},
+      );
+      expect(
+        () => check(open),
+        refused(
+          'gives just_game_engine ">=2.1.0", which has no upper limit: name '
+          'the versions it was made for, like "^2.1.0" or ">=2.1.0 <3.0.0"',
+        ),
+      );
+    });
+
+    test('only names the store checks', () {
+      final odd = TestItem(
+        'their_kit',
+        kind: ItemKind.kit,
+        category: 'kits',
+        requires: {...hostRanges, 'just_rocket': '^1.0.0'},
+      );
+      expect(
+        () => check(odd),
+        refused('names "just_rocket", which the store does not check'),
+      );
+    });
+
+    test('the same ranges as the catalog', () {
+      final kit = TestItem('their_kit', kind: ItemKind.kit, category: 'kits');
+      expect(
+        () => check(
+          kit,
+          change: manifest(
+            (m) =>
+                m['requires'] = {...hostRanges, 'just_game_engine': '^2.2.0'},
+          ),
+        ),
+        refused(
+          'disagree on what it needs of the project (just_game_engine: '
+          '^2.2.0 against ^2.1.0)',
+        ),
+      );
+    });
+
+    test('no wider than its pubspec allows', () {
+      final kit = TestItem(
+        'their_kit',
+        kind: ItemKind.kit,
+        category: 'kits',
+        pubDependencies: {'just_game_engine': '^2.2.0'},
+      );
+      expect(
+        () => check(kit),
+        refused(
+          'says it works with just_game_engine ^2.1.0, but its pubspec allows '
+          'only ^2.2.0',
+        ),
+      );
+      final fits = TestItem(
+        'their_kit',
+        kind: ItemKind.kit,
+        category: 'kits',
+        pubDependencies: {'just_game_engine': '^2.0.0'},
+      );
+      expect(check(fits).manifest.id, 'their_kit');
+    });
+
+    test("the editor's own parts and content name none", () {
+      final part = TestItem(
+        'just_editor_part',
+        kind: ItemKind.editorExtension,
+        category: 'core',
+        requires: const {},
+      );
+      expect(
+        check(
+          part,
+          change: manifest((m) => m['system'] = true),
+        ).manifest.system,
+        isTrue,
+      );
+      expect(check(TestItem('just_art_knight')).manifest.requires, isEmpty);
+    });
   });
 
   test('bin/ is for official tools only', () {

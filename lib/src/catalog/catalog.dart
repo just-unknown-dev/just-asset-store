@@ -22,6 +22,7 @@ export 'item_details.dart';
 export 'item_manifest.dart';
 export 'item_traits.dart';
 export 'just_release.dart';
+export 'requirements.dart';
 export 'reserved_names.dart';
 export 'store_index.dart';
 export 'store_item.dart';

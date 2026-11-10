@@ -21,7 +21,7 @@ Every store item is a Dart package. Copy this folder into a new GitHub repositor
   | `stage` | How finished this version is: `stable`, `beta`, `experimental` or `deprecated`. Every editor tool and kit names one (`pack` and `validate` refuse one without). The store and the editor show it; experimental items are listed only to those who turn on "Show experimental", deprecated ones only to a search, and installing either asks first. |
   | `replacedBy` | For a deprecated item: the id of the item that replaces it, which the store suggests. |
   | `license` | An SPDX id, plus `attribution` when users must credit you. |
-  | `requires` | What it needs of the project: `sdk` (Dart), `flutter`, `just_game_engine`, `just_game_engine_editor`, each a version constraint. |
+  | `requires` | What it needs of the project: `just_game_engine`, `just_game_engine_editor`, `flutter`, `sdk` (Dart), each a version constraint, and no other name. Every editor tool and kit gives the range of engine versions and the range of editor versions it works with, each with an upper limit (`"just_game_engine": "^2.1.0", "just_game_engine_editor": "^0.2.0"`), no wider than its pubspec allows for them; `pack` and `validate` refuse one without. The store installs a version only into a project whose engine and editor are in both ranges, lists only those versions, and refuses the rest, in the editor and from `just store`. |
   | `dependencies` | The other store items it needs, by id, each a version constraint. Each must also be in the pubspec's `dependencies`, and the catalog must list the same. |
   | `content.assetFolders` | The same list as the pubspec. |
   | `content.entryPoints` | Its main files, each `{kind, path}`, for the details pane. |

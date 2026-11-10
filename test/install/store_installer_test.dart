@@ -75,7 +75,11 @@ class Fixture {
     Map<String, String> extraFiles = const {},
   }) async {
     final dir = tempDir('install');
-    writeFiles(dir, {'pubspec.yaml': pubspecText, ...extraFiles});
+    writeFiles(dir, {
+      'pubspec.yaml': pubspecText,
+      ...resolvedProject(),
+      ...extraFiles,
+    });
     final source = buildCatalog(tempDir('catalog'), items);
     final catalog = StoreCatalog([
       ('test', source, (await source.fetchIndex()).index),
@@ -556,7 +560,7 @@ void main() {
 
   test("a package may not depend on a store item it doesn't declare", () async {
     final dir = tempDir('install');
-    writeFiles(dir, {'pubspec.yaml': pubspecText});
+    writeFiles(dir, {'pubspec.yaml': pubspecText, ...resolvedProject()});
     final source = buildCatalog(tempDir('catalog'), [
       TestItem('just_art_knight'),
       TestItem(
@@ -600,7 +604,7 @@ void main() {
 
   test("the manifest and the catalog agree on what it needs", () async {
     final dir = tempDir('install');
-    writeFiles(dir, {'pubspec.yaml': pubspecText});
+    writeFiles(dir, {'pubspec.yaml': pubspecText, ...resolvedProject()});
     final catalogDir = tempDir('catalog');
     final source = buildCatalog(catalogDir, [
       TestItem('just_art_knight'),
@@ -710,6 +714,11 @@ void main() {
         category: 'kits',
         modules: ['KitModule'],
         extensions: ['JustKit.extension'],
+        // What the stand-ins are, as pub resolves them.
+        requires: {
+          'just_game_engine': '^2.0.0',
+          'just_game_engine_editor': '^1.0.0',
+        },
         pubDependencies: {
           'just_game_engine_editor': '^1.0.0',
           'just_game_engine': '^2.0.0',

@@ -55,6 +55,26 @@ LockedItem locked(
 
 Iterable<String> blockers(InstallPlan p) => p.blockers.map((b) => b.message);
 
+/// A project pub resolved with [testHost]'s engine and editor, unless
+/// [environment] says otherwise.
+ProjectState hostState({
+  required StoreLock lock,
+  Map<String, ItemManifest> manifests = const {},
+  Map<String, DependencySpec> foreignOverrides = const {},
+  PackageGraph? graph,
+  Map<String, Version>? environment,
+  bool resolved = true,
+  Set<String> existingFolders = const {},
+}) => ProjectState(
+  lock: lock,
+  manifests: manifests,
+  foreignOverrides: foreignOverrides,
+  graph: graph,
+  environment: environment ?? testHost,
+  resolved: resolved,
+  existingFolders: existingFolders,
+);
+
 void main() {
   test('installs an item, and what it needs', () async {
     final catalog = await catalogOf([
@@ -68,7 +88,7 @@ void main() {
     ]);
     final plan = Planner(
       catalog,
-      ProjectState(lock: StoreLock()),
+      hostState(lock: StoreLock()),
     ).install('just_kit');
     expect(plan.canApply, isTrue, reason: '${plan.issues}');
     expect(
@@ -88,7 +108,7 @@ void main() {
     ]);
     final plan = Planner(
       catalog,
-      ProjectState(lock: StoreLock()),
+      hostState(lock: StoreLock()),
     ).install('just_art_knight', version: Version.parse('1.0.0'));
     expect('${plan.changes.single.version!.version}', '1.0.0');
     expect(plan.needsRestart, isFalse, reason: 'content');
@@ -103,7 +123,7 @@ void main() {
         versions: ['1.0.0', '1.5.0', '2.0.0'],
       ),
     ]);
-    final state = ProjectState(
+    final state = hostState(
       lock: StoreLock(
         items: {
           'just_user': locked('just_user', '1.0.0'),
@@ -135,25 +155,276 @@ void main() {
     expect('${planner.availableUpdate('just_core')!.version}', '2.0.0');
   });
 
-  test('requires is checked against the project', () async {
-    final catalog = await catalogOf([
-      TestItem(
-        'just_kit',
-        category: 'kits',
-        kind: ItemKind.kit,
-        requires: {'just_game_engine': '^3.0.0'},
-      ),
-    ]);
-    final plan = Planner(
-      catalog,
-      ProjectState(
-        lock: StoreLock(),
-        environment: {'just_game_engine': Version.parse('2.0.0')},
-      ),
-    ).install('just_kit');
-    expect(
-      blockers(plan).single,
-      contains('needs just_game_engine ^3.0.0; this project has 2.0.0'),
+  group('engine and editor ranges', () {
+    TestItem kit(
+      String id,
+      List<String> versions, {
+      Map<String, String>? requires,
+    }) => TestItem(
+      id,
+      kind: ItemKind.kit,
+      category: 'kits',
+      versions: versions,
+      requires: requires,
+    );
+
+    /// A catalog of [items] whose versions get [patch]'s fields (by id,
+    /// then version) on top.
+    Future<StoreCatalog> patched(
+      List<TestItem> items,
+      Map<String, Map<String, Map<String, Object?>>> patch,
+    ) async {
+      final dir = tempDir('cat');
+      final source = buildCatalog(dir, items);
+      final file = File('${dir.path}/index.json');
+      final json = jsonDecode(file.readAsStringSync()) as Map<String, Object?>;
+      for (final item in (json['items'] as List).cast<Map<String, Object?>>()) {
+        for (final v
+            in (item['versions'] as List).cast<Map<String, Object?>>()) {
+          v.addAll(patch[item['id']]?[v['version']] ?? const {});
+        }
+      }
+      file.writeAsStringSync(jsonEncode(json));
+      return StoreCatalog([
+        ('test', source, (await source.fetchIndex()).index),
+      ]);
+    }
+
+    final engine3 = <String, Object?>{
+      'requires': {...hostRanges, 'just_game_engine': '^3.0.0'},
+    };
+
+    test(
+      'a version made for another engine is refused, and says why',
+      () async {
+        final catalog = await catalogOf([
+          kit(
+            'just_kit',
+            ['1.0.0'],
+            requires: {...hostRanges, 'just_game_engine': '^3.0.0'},
+          ),
+        ]);
+        final plan = Planner(
+          catalog,
+          hostState(
+            lock: StoreLock(),
+            environment: {...testHost, 'just_game_engine': Version(2, 0, 0)},
+          ),
+        ).install('just_kit');
+        expect(plan.canApply, isFalse);
+        expect(
+          blockers(plan).single,
+          'Just Kit 1.0.0 needs Just Game Engine ^3.0.0; this project has '
+          '2.0.0.',
+        );
+      },
+    );
+
+    test('so is one made for another editor', () async {
+      final catalog = await catalogOf([
+        kit(
+          'just_kit',
+          ['1.0.0'],
+          requires: {...hostRanges, 'just_game_engine_editor': '^0.3.0'},
+        ),
+      ]);
+      final plan = Planner(
+        catalog,
+        hostState(lock: StoreLock()),
+      ).install('just_kit');
+      expect(
+        blockers(plan).single,
+        'Just Kit 1.0.0 needs Just Game Engine Editor ^0.3.0; this project '
+        'has 0.2.0.',
+      );
+    });
+
+    test('a plugin that names no range is never installed', () async {
+      final catalog = await catalogOf([
+        kit('just_kit', ['1.0.0'], requires: const {}),
+        kit('just_half', ['1.0.0'], requires: {'just_game_engine': '^2.1.0'}),
+        // Content needs neither.
+        TestItem('just_art_knight'),
+      ]);
+      final planner = Planner(catalog, hostState(lock: StoreLock()));
+      expect(
+        blockers(planner.install('just_kit')).single,
+        "Just Kit 1.0.0 doesn't say which Just Game Engine versions it works "
+        'with, so the store cannot check it.',
+      );
+      expect(
+        blockers(planner.install('just_half')).single,
+        contains('which Just Game Engine Editor versions'),
+      );
+      expect(planner.install('just_art_knight').canApply, isTrue);
+    });
+
+    test('nor where the store cannot tell the engine or the editor', () async {
+      final catalog = await catalogOf([
+        kit('just_kit', ['1.0.0']),
+      ]);
+      final unresolved = Planner(
+        catalog,
+        hostState(lock: StoreLock(), environment: const {}, resolved: false),
+      );
+      expect(
+        blockers(unresolved.install('just_kit')).single,
+        "Just Kit 1.0.0 needs Just Game Engine ^2.1.0, and the store can't "
+        'tell which this project has: run pub get in it first.',
+      );
+      final noEditor = Planner(
+        catalog,
+        hostState(
+          lock: StoreLock(),
+          environment: {'just_game_engine': testHost['just_game_engine']!},
+        ),
+      );
+      expect(
+        blockers(noEditor.install('just_kit')).single,
+        'Just Kit 1.0.0 needs Just Game Engine Editor ^0.2.0; this project '
+        'has none.',
+      );
+    });
+
+    test('nor one needing what the store cannot check', () async {
+      final catalog = await catalogOf([
+        kit(
+          'just_kit',
+          ['1.0.0'],
+          requires: {...hostRanges, 'just_rocket': '^1.0.0'},
+        ),
+      ]);
+      final plan = Planner(
+        catalog,
+        hostState(lock: StoreLock()),
+      ).install('just_kit');
+      expect(
+        blockers(plan).single,
+        contains(
+          'needs just_rocket ^1.0.0, which this version of the Asset Store '
+          'cannot check',
+        ),
+      );
+    });
+
+    test('Flutter and Dart the store cannot see are left to pub', () async {
+      final catalog = await catalogOf([
+        kit(
+          'just_kit',
+          ['1.0.0'],
+          requires: {...hostRanges, 'flutter': '>=3.47.1', 'sdk': '^3.11.0'},
+        ),
+      ]);
+      final planner = Planner(catalog, hostState(lock: StoreLock()));
+      expect(planner.install('just_kit').canApply, isTrue);
+      final oldFlutter = Planner(
+        catalog,
+        hostState(
+          lock: StoreLock(),
+          environment: {...testHost, 'flutter': Version(3, 41, 0)},
+        ),
+      );
+      expect(
+        blockers(oldFlutter.install('just_kit')).single,
+        'Just Kit 1.0.0 needs Flutter >=3.47.1; this project has 3.41.0.',
+      );
+    });
+
+    test(
+      "a plain install takes the newest that fits; a pick of one that doesn't "
+      'is refused',
+      () async {
+        final catalog = await patched(
+          [
+            kit('k', ['1.0.0', '1.1.0', '2.0.0']),
+          ],
+          {
+            'k': {'2.0.0': engine3},
+          },
+        );
+        final planner = Planner(catalog, hostState(lock: StoreLock()));
+        expect(
+          '${planner.install('k').changes.single.version!.version}',
+          '1.1.0',
+        );
+        expect('${planner.pick('k')!.version}', '1.1.0');
+        expect(
+          [for (final v in planner.versionsFor('k')) '${v.version}'],
+          ['1.1.0', '1.0.0'],
+        );
+        expect(
+          planner.newestProblem('k'),
+          'K 2.0.0 needs Just Game Engine ^3.0.0; this project has 2.1.3.',
+        );
+        expect(planner.problemWith('k', planner.pick('k')!), isNull);
+        final forced = planner.install('k', version: Version(2, 0, 0));
+        expect(
+          blockers(forced).single,
+          'K 2.0.0 needs Just Game Engine ^3.0.0; this project has 2.1.3.',
+        );
+      },
+    );
+
+    test('an item that needs one made for another engine goes back to an older '
+        'version of it', () async {
+      // a 2.0.0 needs b ^2.0.0, made for engine 3; a 1.0.0 needs b ^1.0.0.
+      final catalog = await patched(
+        [
+          kit('a', ['1.0.0', '2.0.0']),
+          kit('b', ['1.0.0', '2.0.0']),
+        ],
+        {
+          'a': {
+            '1.0.0': {
+              'dependencies': {'b': '^1.0.0'},
+            },
+            '2.0.0': {
+              'dependencies': {'b': '^2.0.0'},
+            },
+          },
+          'b': {'2.0.0': engine3},
+        },
+      );
+      final plan = Planner(catalog, hostState(lock: StoreLock())).install('a');
+      expect(plan.canApply, isTrue);
+      expect(
+        [for (final c in plan.changes) '${c.id} ${c.version!.version}'],
+        ['a 1.0.0', 'b 1.0.0'],
+      );
+    });
+
+    test(
+      'updates offer only versions that fit, and say what holds them back',
+      () async {
+        final catalog = await patched(
+          [
+            kit('k', ['1.0.0', '2.0.0']),
+          ],
+          {
+            'k': {'2.0.0': engine3},
+          },
+        );
+        final planner = Planner(
+          catalog,
+          hostState(lock: StoreLock(items: {'k': locked('k', '1.0.0')})),
+        );
+        expect(planner.availableUpdate('k'), isNull);
+        final one = planner.update('k');
+        expect(one.changes, isEmpty);
+        expect(
+          one.issues.single.message,
+          "K 1.0.0 is the newest version for this project's engine and "
+          'editor. K 2.0.0 needs Just Game Engine ^3.0.0; this project has '
+          '2.1.3.',
+        );
+        final all = planner.updateAll();
+        expect(all.changes, isEmpty);
+        expect(
+          all.issues.single.message,
+          'K 1.0.0 stays: K 2.0.0 needs Just Game Engine ^3.0.0; this project '
+          'has 2.1.3.',
+        );
+      },
     );
   });
 
@@ -177,12 +448,12 @@ void main() {
       });
       var plan = Planner(
         catalog,
-        ProjectState(lock: StoreLock(), graph: PackageGraph.read(dir.path)),
+        hostState(lock: StoreLock(), graph: PackageGraph.read(dir.path)),
       ).install('just_art_knight');
       expect(blockers(plan).single, contains('already uses a package named'));
       plan = Planner(
         catalog,
-        ProjectState(
+        hostState(
           lock: StoreLock(),
           existingFolders: {'packages/characters/just_art_knight'},
         ),
@@ -203,7 +474,7 @@ void main() {
     ]);
     InstallPlan plan(String id, Set<String> folders) => Planner(
       catalog,
-      ProjectState(lock: StoreLock(), existingFolders: folders),
+      hostState(lock: StoreLock(), existingFolders: folders),
     ).install(id);
 
     // Its own folder.
@@ -269,7 +540,7 @@ void main() {
     ]);
     final planner = Planner(
       catalog,
-      ProjectState(lock: StoreLock(), graph: const PackageGraph(['game'], {})),
+      hostState(lock: StoreLock(), graph: const PackageGraph(['game'], {})),
     );
     expect(blockers(planner.install('just_art_paid')).single, contains('paid'));
     final tool = planner.install('their_tool');
@@ -311,7 +582,7 @@ void main() {
     ]);
     final plan = Planner(
       catalog,
-      ProjectState(lock: StoreLock(), graph: const PackageGraph(['game'], {})),
+      hostState(lock: StoreLock(), graph: const PackageGraph(['game'], {})),
     ).install('their_tool');
     expect(
       plan.issues.map((i) => '${i.level.name}: ${i.message}'),
@@ -342,6 +613,7 @@ void main() {
           versions: [
             StoreItemVersion(
               version: Version(1, 0, 0),
+              requires: hostRequires,
               archive: StoreArchive(
                 url: 'a.zip',
                 sha256: 'a' * 64,
@@ -355,7 +627,7 @@ void main() {
     final source = MemoryStoreSource(big, const {});
     final plan = Planner(
       StoreCatalog([('big', source, big)]),
-      ProjectState(lock: StoreLock(), graph: const PackageGraph(['game'], {})),
+      hostState(lock: StoreLock(), graph: const PackageGraph(['game'], {})),
     ).install('huge_kit');
     expect(
       blockers(plan).single,
@@ -385,7 +657,7 @@ void main() {
       ),
       TestItem('just_kit', kind: ItemKind.kit, category: 'kits'),
     ]);
-    final planner = Planner(catalog, ProjectState(lock: StoreLock()));
+    final planner = Planner(catalog, hostState(lock: StoreLock()));
     String warnings(String id) => planner
         .install(id)
         .issues
@@ -478,7 +750,7 @@ void main() {
     ]);
     final planner = Planner(
       catalog,
-      ProjectState(lock: StoreLock(), graph: const PackageGraph(['game'], {})),
+      hostState(lock: StoreLock(), graph: const PackageGraph(['game'], {})),
     );
     for (final id in ['just_fake', 'flutter_test']) {
       expect(
@@ -504,7 +776,7 @@ void main() {
         ),
         TestItem('just_kit', category: 'kits', kind: ItemKind.kit),
       ]);
-      final unresolved = Planner(catalog, ProjectState(lock: StoreLock()));
+      final unresolved = Planner(catalog, hostState(lock: StoreLock()));
       expect(
         blockers(unresolved.install('their_kit')).single,
         startsWith('Run pub get in this project first'),
@@ -538,10 +810,7 @@ void main() {
       ]);
       final planner = Planner(
         catalog,
-        ProjectState(
-          lock: StoreLock(),
-          graph: const PackageGraph(['game'], {}),
-        ),
+        hostState(lock: StoreLock(), graph: const PackageGraph(['game'], {})),
       );
       expect(
         blockers(planner.install('their_kit')),
@@ -563,7 +832,7 @@ void main() {
         dependencies: {'just_core': '^1.0.0'},
       ),
     ]);
-    final state = ProjectState(
+    final state = hostState(
       lock: StoreLock(),
       foreignOverrides: {
         'just_core': const PathDependency('packages/just_core'),
@@ -583,7 +852,7 @@ void main() {
     ]);
     final plan = Planner(
       catalog,
-      ProjectState(
+      hostState(
         lock: StoreLock(items: {'just_kit': locked('just_kit', '1.0.0')}),
       ),
     ).install('just_kit');
@@ -603,7 +872,7 @@ void main() {
     ]);
     final plan = Planner(
       catalog,
-      ProjectState(lock: StoreLock()),
+      hostState(lock: StoreLock()),
     ).install('just_kit');
     expect(
       blockers(plan).single,
@@ -624,7 +893,7 @@ void main() {
     ]);
     final plan = Planner(
       catalog,
-      ProjectState(lock: StoreLock()),
+      hostState(lock: StoreLock()),
     ).install('just_tiled');
     expect(plan.changes.single.itemKind, ItemKind.runtimeLibrary);
     expect(plan.changes.single.path, isNull);
@@ -648,7 +917,7 @@ void main() {
     ]);
     final plan = Planner(
       catalog,
-      ProjectState(
+      hostState(
         lock: StoreLock(
           items: {
             'just_a': locked('just_a', '1.0.0'),
@@ -666,7 +935,7 @@ void main() {
   group('uninstall', () {
     test('takes dependencies nothing else needs', () async {
       final catalog = await catalogOf(const []);
-      final state = ProjectState(
+      final state = hostState(
         lock: StoreLock(
           items: {
             'just_kit': locked('just_kit', '1.0.0'),
@@ -695,7 +964,7 @@ void main() {
       'is refused while others need it, for system items, and while code imports it',
       () async {
         final catalog = await catalogOf(const []);
-        final state = ProjectState(
+        final state = hostState(
           lock: StoreLock(
             items: {
               'just_core': locked('just_core', '1.0.0'),
@@ -828,7 +1097,7 @@ void main() {
       ]);
     }
 
-    ProjectState installed(Map<String, String> versions) => ProjectState(
+    ProjectState installed(Map<String, String> versions) => hostState(
       lock: StoreLock(
         items: {
           for (final e in versions.entries)
@@ -873,10 +1142,7 @@ void main() {
 
     test('of something not installed are refused', () async {
       final catalog = await catalogOf([TestItem('k')]);
-      final plan = Planner(
-        catalog,
-        ProjectState(lock: StoreLock()),
-      ).update('k');
+      final plan = Planner(catalog, hostState(lock: StoreLock())).update('k');
       expect(plan.changes, isEmpty);
       expect(blockers(plan).single, contains('not installed'));
     });
@@ -946,7 +1212,7 @@ void main() {
       final catalog = StoreCatalog([
         ('test', source, (await source.fetchIndex()).index),
       ]);
-      final state = ProjectState(
+      final state = hostState(
         lock: StoreLock(
           items: {
             'd': locked('d', '1.0.0'),
@@ -991,10 +1257,7 @@ void main() {
       final catalog = StoreCatalog([
         ('test', source, (await source.fetchIndex()).index),
       ]);
-      final plan = Planner(
-        catalog,
-        ProjectState(lock: StoreLock()),
-      ).install('t');
+      final plan = Planner(catalog, hostState(lock: StoreLock())).install('t');
       expect(plan.canApply, isTrue, reason: '${plan.issues}');
       expect(plan.changes.map((c) => '${c.id} ${c.version!.version}'), [
         't 1.0.0',
@@ -1016,14 +1279,14 @@ void main() {
             jsonDecode(file.readAsStringSync()) as Map<String, Object?>;
         final versions =
             ((json['items'] as List).single as Map)['versions'] as List;
-        (versions.last as Map)['requires'] = {'just_game_engine': '^3.0.0'};
+        (versions.last as Map)['requires'] = {
+          ...hostRanges,
+          'just_game_engine': '^3.0.0',
+        };
         file.writeAsStringSync(jsonEncode(json));
         final plan = Planner(
           StoreCatalog([('test', source, (await source.fetchIndex()).index)]),
-          ProjectState(
-            lock: StoreLock(),
-            environment: {'just_game_engine': Version.parse('2.0.0')},
-          ),
+          hostState(lock: StoreLock()),
         ).install('k');
         expect('${plan.changes.single.version!.version}', '1.0.0');
         expect(plan.canApply, isTrue);
@@ -1037,7 +1300,7 @@ void main() {
           TestItem('art'),
           kit('kit', ['1.0.0'], {'art': '^1.0.0'}),
         ]);
-        final state = ProjectState(
+        final state = hostState(
           lock: StoreLock(
             items: {
               'kit': locked('kit', '1.0.0'),
@@ -1066,7 +1329,7 @@ void main() {
 
   test('items that need each other go together', () async {
     final catalog = await catalogOf(const []);
-    final state = ProjectState(
+    final state = hostState(
       lock: StoreLock(
         items: {
           'a': locked('a', '1.0.0'),
@@ -1152,7 +1415,7 @@ void main() {
             StoreCatalog([
               ('x', recorded, (await recorded.fetchIndex()).index),
             ]),
-            ProjectState(lock: StoreLock()),
+            hostState(lock: StoreLock()),
           ).install('just_kit'),
         ).join(),
         contains('only the store\'s own team'),
@@ -1192,7 +1455,7 @@ void main() {
       ),
     ]);
     String? warning(int unpacked) =>
-        Planner(big(unpacked), ProjectState(lock: StoreLock()))
+        Planner(big(unpacked), hostState(lock: StoreLock()))
             .install('art')
             .issues
             .where((i) => i.message.contains('unpacks'))
@@ -1215,7 +1478,7 @@ void main() {
     file.writeAsStringSync(jsonEncode(json));
     final planner = Planner(
       StoreCatalog([('test', source, (await source.fetchIndex()).index)]),
-      ProjectState(
+      hostState(
         lock: StoreLock(
           items: {'k': locked('k', '1.0.0', category: 'characters')},
         ),
@@ -1244,7 +1507,7 @@ void main() {
     );
     final source = buildCatalog(tempDir('cat'), [TestItem('other')]);
     final listing = (await source.fetchIndex()).index;
-    final state = ProjectState(
+    final state = hostState(
       lock: StoreLock(
         items: {
           'k': LockedItem(
@@ -1304,7 +1567,7 @@ void main() {
         dependencies: {'art': '^1.0.0'},
       ),
     ]);
-    final state = ProjectState(
+    final state = hostState(
       lock: StoreLock(
         items: {
           'kit': locked('kit', '1.0.0'),
@@ -1341,7 +1604,7 @@ void main() {
       ]);
       final project = tempDir('proj');
       writeFiles(project, {'pubspec.yaml': pubspecOf('app')});
-      final (code, out, _) = await store([
+      final (code, _, err) = await store([
         'install',
         'starter_game',
         '--project',
@@ -1350,7 +1613,7 @@ void main() {
         source.indexUri.toFilePath(),
       ]);
       expect(code, 1);
-      expect(out, contains('just create <folder> --template starter_game'));
+      expect(err, contains('just create <folder> --template starter_game'));
     });
 
     test('refuses an item the store stopped offering', () async {
@@ -1363,7 +1626,7 @@ void main() {
       File('${dir.path}/index.json').writeAsStringSync(jsonEncode(index));
       final project = tempDir('proj');
       writeFiles(project, {'pubspec.yaml': pubspecOf('app')});
-      final (code, out, _) = await store([
+      final (code, _, err) = await store([
         'install',
         'just_art_knight',
         '--project',
@@ -1372,7 +1635,7 @@ void main() {
         source.indexUri.toFilePath(),
       ]);
       expect(code, 1);
-      expect(out, contains('no longer offered'));
+      expect(err, contains('no longer offered'));
     });
   });
 }

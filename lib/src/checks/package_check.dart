@@ -8,6 +8,7 @@ import 'package:just_core_cli/just_core_cli.dart';
 
 import '../catalog/item_manifest.dart';
 import '../catalog/item_traits.dart';
+import '../catalog/requirements.dart';
 import '../catalog/store_item.dart';
 import 'pubspec_facts.dart';
 
@@ -444,6 +445,44 @@ abstract final class PackageCheck {
           'from pub.dev (${differ.join(', ')}). A store item it needs '
           'belongs in its ${ItemManifest.fileName} dependencies, or pub '
           'would look for another package of that name on pub.dev.',
+        );
+      }
+    }
+    // Every plugin names the engine and editor versions it works with, and
+    // the store installs it only where both are in range.
+    for (final problem in Requirements.problems(
+      manifest.requires,
+      item.kind,
+      system: manifest.system,
+    )) {
+      problems.add('Its ${ItemManifest.fileName}: $problem');
+    }
+    if (matchDependencies) {
+      final listed = version.requires;
+      final declared = manifest.requires;
+      final differ = [
+        for (final name in {...listed.keys, ...declared.keys})
+          if ('${listed[name]}' != '${declared[name]}') name,
+      ]..sort();
+      if (differ.isNotEmpty) {
+        problems.add(
+          'Its manifest and the catalog disagree on what it needs of the '
+          'project (${differ.map((n) => '$n: ${declared[n] ?? 'not in the manifest'} '
+              'against ${listed[n] ?? 'not in the catalog'}').join('; ')}).',
+        );
+      }
+    }
+    // A range wider than its pubspec allows would let the store put it in
+    // a project pub then can't resolve.
+    for (final name in Requirements.forPlugins) {
+      final declared = manifest.requires[name];
+      final dep = deps[name];
+      if (declared == null || dep is! HostedPubDependency) continue;
+      final allowed = dep.constraint;
+      if (allowed != null && !Requirements.within(declared, allowed)) {
+        problems.add(
+          'Its ${ItemManifest.fileName} says it works with $name $declared, '
+          'but its pubspec allows only $allowed.',
         );
       }
     }

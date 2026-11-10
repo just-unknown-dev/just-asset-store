@@ -46,7 +46,7 @@ void main() {
 
     test('puts a missing plugin back in plugins/', () async {
       final dir = tempDir('restore');
-      writeFiles(dir, {'pubspec.yaml': pubspecOf('app')});
+      writeFiles(dir, {'pubspec.yaml': pubspecOf('app'), ...resolvedProject()});
       final source = buildCatalog(tempDir('catalog'), [
         TestItem('just_art_knight'),
         TestItem(

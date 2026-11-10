@@ -6,6 +6,7 @@ import 'package:just_core_cli/project.dart';
 import 'package:meta/meta.dart';
 
 import '../catalog/item_traits.dart';
+import '../catalog/requirements.dart';
 import '../catalog/store_item.dart';
 import '../lockfile/store_lock.dart';
 import 'install_plan.dart';
@@ -19,7 +20,9 @@ import 'store_catalog.dart';
 /// items the plan keeps (by their manifests), and the versions it picks
 /// (by the catalog). An installed item the plan replaces stops
 /// constraining anything: its new version speaks for it. Installed items
-/// are kept while they fit, and replaced only when they must.
+/// are kept while they fit, and replaced only when they must. A version
+/// made for another engine or editor than the project's
+/// ([ProjectVersions.fits]) is never picked.
 @internal
 final class VersionResolver {
   /// A resolver for [targets], over [catalog] and the project's [state],
@@ -234,31 +237,39 @@ final class VersionResolver {
         ),
       );
     }
-    final versions = [
+    final allowed = [
       for (final v in item.available)
         if (constraints.every((c) => c.$1.allows(v.version)) &&
             !(keep && v.version == installed))
           v,
     ]..sort(_preference);
-    final options = <StoreItemVersion?>[if (keep) null, ...versions];
-    if (options.isEmpty) return (options, _noFit(id, constraints));
-    return (options, null);
+    // Only versions made for this project's engine and editor: one made
+    // for others is never an option, so the search goes back to an older
+    // version of what needs it instead.
+    final versions = _state.versions;
+    final options = <StoreItemVersion?>[
+      if (keep) null,
+      for (final v in allowed)
+        if (versions.fits(item, v)) v,
+    ];
+    if (options.isNotEmpty) return (options, null);
+    if (allowed.isEmpty) return (options, _noFit(id, constraints));
+    return (
+      options,
+      PlanIssue(
+        IssueLevel.blocker,
+        versions.problemWith(item, allowed.first)!,
+        id: id,
+      ),
+    );
   }
 
-  /// Versions this project can run before those it can't, releases before
-  /// pre-releases, newest first.
+  /// Releases before pre-releases, newest first.
   int _preference(StoreItemVersion a, StoreItemVersion b) {
-    final fa = _runsHere(a), fb = _runsHere(b);
-    if (fa != fb) return fa ? -1 : 1;
     final pa = a.version.isPreRelease, pb = b.version.isPreRelease;
     if (pa != pb) return pa ? 1 : -1;
     return b.version.compareTo(a.version);
   }
-
-  bool _runsHere(StoreItemVersion v) => v.requires.entries.every((e) {
-    final have = _state.environment[e.key];
-    return have == null || e.value.allows(have);
-  });
 
   PlanIssue _noFit(String id, List<(VersionConstraint, String)> constraints) {
     final item = _catalog.entry(id)?.item;

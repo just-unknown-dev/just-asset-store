@@ -37,6 +37,17 @@ Installing an item that is already there as another item's dependency makes it o
 
 **Addresses.** A catalog on the web never makes the store fetch from this machine or its network — its archives, its pictures, or any address a server redirects a download to (`StoreSource.mayFetch`, asked about every redirect before anything is sent there). A catalog in a folder is recorded in the lockfile by its path from the project, as its archives are, so a teammate's clone finds it.
 
+## Only what fits the project's engine and editor
+
+Every plugin version (an editor tool or a kit) says, in its `just_store.json` `requires`, the range of `just_game_engine` versions and the range of `just_game_engine_editor` versions it works with, each with an upper limit; `pack`, `validate` and the catalog's checks refuse one that doesn't. The store reads the engine and editor the project resolved (`ProjectVersions`, from `.dart_tool/package_graph.json`) and installs only versions whose ranges hold both:
+- a plain install takes the newest version that fits, going back to an older one of an item when what it needs doesn't fit;
+- asking for a version that doesn't fit is refused, naming both: "Platformer Kit 0.3.0-beta.1 needs Just Game Engine ^2.1.0; this project has 2.0.3." `just store` fails with it (exit code 1), and the editor's store window shows it and won't install;
+- before `pub get` the store can't tell, and says to run it;
+- updates offer only versions that fit, and say what holds back a newer one;
+- `StoreInstaller.apply` checks again just before it changes anything.
+
+The editor's store window lists only the versions that fit, and `just store info` marks the rest "not for this project".
+
 ## Installing is all or nothing
 
 Every archive is downloaded and checked before the project is touched, one at a time, on another isolate; only what the install needs of each is kept, and its files are unpacked again when they are staged, so a plan of several large packs holds one in memory at a time:
@@ -86,7 +97,7 @@ Every command has its own `--help`, and takes `--json`, `--yes`, `--verbose` and
 Outside a project (a catalog's or an item's CI), activate the store globally and run its commands directly, at a pinned version:
 
 ```text
-dart pub global activate just_asset_store 0.3.0
+dart pub global activate just_asset_store 0.4.0
 dart pub global run just_asset_store:just_plugin store index check .
 ```
 

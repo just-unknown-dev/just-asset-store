@@ -150,7 +150,8 @@ abstract class StoreProjectCommand extends JustCommand {
     final plan = await store.withLocalEdits(planned);
     printPlan(plan);
     output.result = planJson(plan);
-    if (!plan.canApply) return plan.blockers.isEmpty ? 0 : 1;
+    refuseBlocked(plan);
+    if (!plan.canApply) return 0;
     if (!confirm('Apply?')) {
       output.info('Nothing was changed.');
       return 1;
@@ -182,8 +183,21 @@ abstract class StoreProjectCommand extends JustCommand {
     return 0;
   }
 
-  /// Prints [plan]: each change with its reason, then each issue, or
-  /// "Nothing to do." when there is neither.
+  /// Fails the command when [plan] has blockers — a version made for
+  /// another engine or editor, say — naming each one: nothing was changed.
+  void refuseBlocked(InstallPlan plan) {
+    final blockers = [for (final b in plan.blockers) b.message];
+    if (blockers.isEmpty) return;
+    throw CommandFailure(
+      blockers.length == 1
+          ? 'Nothing was changed: ${blockers.single}'
+          : 'Nothing was changed:\n${blockers.map((b) => '  $b').join('\n')}',
+    );
+  }
+
+  /// Prints [plan]: each change with its reason, then each warning and
+  /// note, or "Nothing to do." when there is none. Blockers are left to
+  /// [refuseBlocked], which fails the command with them.
   void printPlan(InstallPlan plan) {
     if (plan.changes.isNotEmpty) output.line('Plan:');
     for (final c in plan.changes) {
@@ -199,11 +213,11 @@ abstract class StoreProjectCommand extends JustCommand {
     }
     for (final i in plan.issues) {
       final mark = switch (i.level) {
-        IssueLevel.blocker => 'x',
+        IssueLevel.blocker => null,
         IssueLevel.warning => '!',
         IssueLevel.info => 'i',
       };
-      output.line('  $mark ${i.message}');
+      if (mark != null) output.line('  $mark ${i.message}');
     }
     if (plan.changes.isEmpty && plan.issues.isEmpty) {
       output.line('Nothing to do.');

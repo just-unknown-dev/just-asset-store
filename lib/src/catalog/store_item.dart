@@ -183,8 +183,9 @@ final class StoreItemVersion {
   /// (`^1.2.0`).
   final VersionConstraint? pubConstraint;
 
-  /// The SDKs and core packages it needs: `sdk`, `flutter`,
-  /// `just_game_engine`, `just_game_engine_editor`.
+  /// What it needs of the project (see `Requirements`): `sdk`, `flutter`, and
+  /// the ranges of `just_game_engine` and `just_game_engine_editor`
+  /// versions it works with, which every plugin version names.
   final Map<String, VersionConstraint> requires;
 
   /// Other store items it needs, by id.
@@ -458,10 +459,16 @@ final class StoreItem {
 
   /// The newest available release, or the newest pre-release when there
   /// is no release; null when nothing is available.
-  StoreItemVersion? get latest {
+  StoreItemVersion? get latest => newest();
+
+  /// The newest available release [where] allows (every one when null), or
+  /// the newest such pre-release when there is no release; null when none
+  /// is: what a plain install picks among them.
+  StoreItemVersion? newest([bool Function(StoreItemVersion v)? where]) {
     StoreItemVersion? best;
     StoreItemVersion? bestPre;
     for (final v in available) {
+      if (where != null && !where(v)) continue;
       if (v.version.isPreRelease) {
         if (bestPre == null || v.version > bestPre.version) bestPre = v;
       } else if (best == null || v.version > best.version) {
