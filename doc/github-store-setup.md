@@ -63,7 +63,7 @@ Every store item is a Dart package in a repository of its own, with the package 
 - **`pubspec.yaml`**:
   - `name` is the item id: lowercase letters, digits and `_`. Ids starting `just_` belong to the official packages.
   - `version` is the item's version.
-  - It depends on other items by version, never by `path:` or `git:` — for example `just_game_engine_editor: ^0.1.0` — and otherwise only on packages from pub.dev.
+  - It depends on other items by version, never by `path:` or `git:` — for example `just_game_engine_editor: ^0.2.0` — and otherwise only on packages from pub.dev.
 - **`just_store.json`**, the item's manifest. Its `version` equals the pubspec's, and its `dependencies` list every store item the pubspec depends on: the store installs exactly those, and pub would look on pub.dev for any other.
 - **`CHANGELOG.md`**, with a `## <version>` section per release: the release workflow posts it as the release notes.
 - **`LICENSE`**, and the same licence in the manifest's `license` field as an SPDX id (`MIT`, `BSD-3-Clause`, `CC0-1.0`…), so the store can show it.

@@ -9,7 +9,7 @@ Every store item is a Dart package. Copy this folder into a new GitHub repositor
 - **`pubspec.yaml`**: `name` is the item id, `version` the item version.
   - Ids are lowercase letters, digits and `_`. Ids starting `just_` belong to the Just Game Engine's own packages.
   - A content item lists every asset folder under `flutter: assets:`. Flutter doesn't look into subfolders, so list each one.
-  - Code items depend on other store items by version, for example `just_game_engine_editor: ^0.1.0`, never by `path:` or `git:`, and only on packages from pub.dev otherwise. The store points store items at their installed copies.
+  - Code items depend on other store items by version, for example `just_game_engine_editor: ^0.2.0`, never by `path:` or `git:`, and only on packages from pub.dev otherwise. The store points store items at their installed copies.
 - **`just_store.json`** describes the item to the store:
 
   | Field | What it holds |
